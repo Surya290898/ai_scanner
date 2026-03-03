@@ -10,7 +10,7 @@ from datetime import datetime
 import os
 
 st.set_page_config(page_title="AI Website Security Scanner", layout="wide")
-st.title("🛡 AI Website Security Scanner (Unicode Safe PDF)")
+st.title("🛡 AI Website Security Scanner (Stable PDF)")
 
 url = st.text_input("Enter your website URL (include https://)")
 
@@ -60,6 +60,9 @@ def severity_color(sev):
 # PDF Class
 # ---------------------------
 class PDF(FPDF):
+    def __init__(self, font_family="Arial"):
+        super().__init__()
+        self.font_family = font_family  # Initialize font_family before add_page()
     def header(self):
         self.set_font(self.font_family, 'B', 16)
         self.cell(0, 10, "AI Website Security Scan Report", ln=True, align="C")
@@ -129,17 +132,15 @@ if st.button("Scan"):
             scan_results.append({"page": frm['page'], "Form": res})
 
         # ---------------------------
-        # Generate PDF (Unicode-safe)
+        # Generate PDF
         # ---------------------------
-        pdf = PDF()
-
-        # --- Register Unicode font before any page ---
+        # --- Determine font ---
         FONT_PATH = "fonts/DejaVuSans.ttf"
         if os.path.exists(FONT_PATH):
+            pdf = PDF(font_family="DejaVuSans")
             pdf.add_font("DejaVuSans", "", FONT_PATH, uni=True)
-            pdf.font_family = "DejaVuSans"
         else:
-            pdf.font_family = "Arial"
+            pdf = PDF(font_family="Arial")
             st.warning("DejaVuSans.ttf not found. Using Arial (Unicode may fail).")
 
         # Cover Page
@@ -186,11 +187,10 @@ if st.button("Scan"):
                 pdf.set_text_color(r,g,b)
                 pdf.cell(50,8,k,border=1)
                 pdf.cell(30,8,sev,border=1)
-                # Use multi_cell (Unicode-safe)
                 pdf.multi_cell(0,8,str(v),border=1)
             pdf.set_text_color(0,0,0) # reset color
 
-        fname="scan_report_unicode_safe.pdf"
+        fname="scan_report_final.pdf"
         pdf.output(fname)
         st.success("✅ Scanning complete!")
         with open(fname,"rb") as f:
