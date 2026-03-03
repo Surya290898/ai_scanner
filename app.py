@@ -60,7 +60,10 @@ def severity_color(sev):
 # ---------------------------
 class PDF(FPDF):
     def header(self):
-        self.set_font(self.font_family, 'B', 16)
+        try:
+            self.set_font(self.font_family, 'B', 16)
+        except:
+            self.set_font("Arial", 'B', 16)
         self.cell(0, 10, "AI Website Security Scan Report", ln=True, align="C")
         self.ln(5)
 
@@ -131,7 +134,8 @@ if st.button("Scan"):
         # Generate PDF
         # ---------------------------
         pdf = PDF()
-        # Font fallback
+
+        # Font registration BEFORE adding any page
         try:
             pdf.add_font("DejaVuSans","", "fonts/DejaVuSans.ttf", uni=True)
             pdf.font_family="DejaVuSans"
