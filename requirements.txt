@@ -1,6 +1,6 @@
 streamlit
 requests
 beautifulsoup4
-fpdf
 fpdf2
-reportlab
+pillow
+selenium
