@@ -5,10 +5,14 @@ from scanner import test_sqli, test_xss, test_form
 from ai_engine import analyze_response
 import requests
 import threading
-import csv
+from datetime import datetime
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib import colors
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 
 st.set_page_config(page_title="AI Website Security Scanner", layout="wide")
-st.title("🛡 AI Website Security Scanner (MVP)")
+st.title("🛡 AI Website Security Scanner (MVP with PDF)")
 
 url = st.text_input("Enter your website URL (include https://)")
 
@@ -18,11 +22,7 @@ url = st.text_input("Enter your website URL (include https://)")
 def safe_text(text):
     if not text:
         return ""
-    text = str(text)
-    replacements = {"⚠️": "WARNING:", "✅": "OK:", "—": "-", "…": "..."}
-    for k, v in replacements.items():
-        text = text.replace(k, v)
-    return text
+    return str(text).replace("⚠️", "WARNING:").replace("✅", "OK:").replace("—", "-").replace("…", "...")
 
 # -------------------------------
 # CSP Evaluation
@@ -50,10 +50,10 @@ def severity_label(issue_type, result):
     return "Low"
 
 def severity_color(sev):
-    if sev == "High": return (255, 0, 0)
-    if sev == "Medium": return (255, 140, 0)
-    if sev == "Low": return (0, 128, 0)
-    return (0, 0, 0)
+    if sev == "High": return colors.red
+    if sev == "Medium": return colors.orange
+    if sev == "Low": return colors.green
+    return colors.black
 
 # -------------------------------
 # Scan Button
@@ -79,6 +79,7 @@ if st.button("Scan"):
         page_res = {"page": page}
         page_res["SQLi"] = "Possible SQL Injection" if test_sqli(page) else "No SQL Injection"
         page_res["XSS"] = "Possible XSS" if test_xss(page) else "No XSS"
+
         try:
             response = requests.get(page, timeout=5)
             page_res["AI"] = analyze_response(response.text)
@@ -143,25 +144,52 @@ if st.button("Scan"):
     col4.metric("Risk Score", risk_score, risk_level)
 
     # -------------------------------
-    # CSV Export
+    # PDF Generation with ReportLab
     # -------------------------------
-    csv_filename = "scan_report.csv"
-    with open(csv_filename, "w", newline="", encoding="utf-8") as csvfile:
-        fieldnames = ["page", "issue_type", "severity", "details"]
-        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-        writer.writeheader()
-        for item in scan_results:
-            page_name = item.get("page")
-            for k, v in item.items():
-                if k == "page": continue
-                writer.writerow({
-                    "page": page_name,
-                    "issue_type": k,
-                    "severity": severity_label(k, v),
-                    "details": str(v)
-                })
+    pdf_filename = "scan_report.pdf"
+    doc = SimpleDocTemplate(pdf_filename, pagesize=A4)
+    styles = getSampleStyleSheet()
+    story = []
 
-    with open(csv_filename, "rb") as f:
-        st.download_button("Download CSV Report", f, file_name=csv_filename)
+    # Cover Page
+    title_style = styles['Title']
+    story.append(Paragraph("AI Website Security Scanner Report", title_style))
+    story.append(Spacer(1, 20))
+    story.append(Paragraph(f"Target URL: {safe_text(url)}", styles['Normal']))
+    story.append(Paragraph(f"Scan Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", styles['Normal']))
+    story.append(Spacer(1, 30))
 
-    st.success("✅ Scan Complete! PDF removed to avoid FPDF issues.")
+    # Executive Summary
+    story.append(Paragraph("Executive Summary", styles['Heading2']))
+    story.append(Spacer(1, 10))
+    story.append(Paragraph(f"Total Pages/Forms Scanned: {len(scan_results)}", styles['Normal']))
+    story.append(Paragraph(f"High Severity Issues: {high}", styles['Normal']))
+    story.append(Paragraph(f"Medium Severity Issues: {medium}", styles['Normal']))
+    story.append(Paragraph(f"Low Severity Issues: {low}", styles['Normal']))
+    story.append(Paragraph(f"Overall Risk Level: {risk_level}", styles['Normal']))
+    story.append(Spacer(1, 20))
+
+    # Detailed Findings
+    for item in scan_results:
+        story.append(Paragraph(f"Page: {safe_text(item.get('page'))}", styles['Heading3']))
+        story.append(Spacer(1, 5))
+        for k, v in item.items():
+            if k == "page": continue
+            sev = severity_label(k, v)
+            tbl = Table([[k, sev, str(v)]], colWidths=[100, 80, 350])
+            tbl.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (0,0), colors.lightgrey),
+                ('TEXTCOLOR', (1,0), (1,0), severity_color(sev)),
+                ('VALIGN', (0,0), (-1,-1), 'TOP'),
+                ('BOX', (0,0), (-1,-1), 0.5, colors.black),
+                ('INNERGRID', (0,0), (-1,-1), 0.5, colors.black),
+                ('FONTNAME', (0,0), (-1,-1), 'Helvetica')
+            ]))
+            story.append(tbl)
+            story.append(Spacer(1,5))
+
+    doc.build(story)
+    st.success("✅ Scan Complete! PDF report generated.")
+
+    with open(pdf_filename, "rb") as f:
+        st.download_button("Download PDF Report", f, file_name=pdf_filename)
