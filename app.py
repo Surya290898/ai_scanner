@@ -24,35 +24,34 @@ if st.button("Scan"):
         scan_results = []
         lock = threading.Lock()
 
-        # Container for real-time updates
+        # Container for real-time page updates
         page_container = st.container()
         progress_bar = st.progress(0)
         total_pages = len(pages)
-        completed_pages = 0
+        progress = {"completed": 0}  # Mutable dictionary for thread-safe counting
 
         def scan_page(page):
-            nonlocal completed_pages
             page_result = {"page": page, "SQLi": None, "XSS": None, "AI": None}
 
-            # SQLi test
+            # SQL Injection test
             page_result["SQLi"] = "⚠️ Possible SQL Injection" if test_sqli(page) else "No SQL Injection"
             # XSS test
             page_result["XSS"] = "⚠️ Possible XSS" if test_xss(page) else "No XSS"
 
-            # AI analysis
+            # AI business logic analysis
             try:
                 response = requests.get(page, timeout=5)
                 page_result["AI"] = analyze_response(response.text)
             except:
                 page_result["AI"] = "Failed AI analysis"
 
-            # Append result safely
+            # Append result and update progress safely
             with lock:
                 scan_results.append(page_result)
-                completed_pages += 1
-                progress_bar.progress(completed_pages / total_pages)
+                progress["completed"] += 1
+                progress_bar.progress(progress["completed"] / total_pages)
 
-            # Display dynamically
+            # Display per-page result in Streamlit
             with page_container:
                 st.write(f"### Page: {page}")
                 st.json(page_result)
