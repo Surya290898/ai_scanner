@@ -9,12 +9,12 @@ from fpdf import FPDF
 from datetime import datetime
 
 st.set_page_config(page_title="AI Website Security Scanner", layout="wide")
-st.title("🛡 AI Website Security Scanner")
+st.title("🛡 AI Website Security Scanner - OWASP Style PDF")
 
 url = st.text_input("Enter your website URL (include https://)")
 
 # ---------------------------
-# Safe Text for PDF (Latin-1)
+# Safe Text for PDF
 # ---------------------------
 def safe_text(text):
     return str(text).encode("latin-1", "replace").decode("latin-1")
@@ -25,7 +25,6 @@ def safe_text(text):
 def evaluate_csp_header(csp_header: str):
     if not csp_header:
         return "⚠️ No Content-Security-Policy header found"
-
     warnings = []
     csp = csp_header.lower()
     if "unsafe-inline" in csp:
@@ -36,7 +35,6 @@ def evaluate_csp_header(csp_header: str):
         warnings.append("Uses wildcard *")
     if "script-src" not in csp and "default-src" not in csp:
         warnings.append("Missing script-src/default-src")
-
     if not warnings:
         return "✅ Strong CSP configuration"
     return "⚠️ Weak CSP: " + ", ".join(warnings)
@@ -64,13 +62,20 @@ def severity_color(sev):
     return (0,0,0)
 
 # ---------------------------
-# PDF Class
+# PDF Class - OWASP Style
 # ---------------------------
 class PDF(FPDF):
     def header(self):
         self.set_font("Arial", "B", 16)
-        self.cell(0, 10, "AI Website Security Scan Report", ln=True, align="C")
+        self.set_fill_color(220, 220, 220)
+        self.cell(0, 10, "AI Website Security Scan Report", ln=True, align="C", fill=True)
         self.ln(5)
+
+    def table_row(self, cols, widths, fill=False, text_color=(0,0,0)):
+        self.set_text_color(*text_color)
+        for i, col in enumerate(cols):
+            self.cell(widths[i], 8, safe_text(col), border=1, ln=0, align='L', fill=fill)
+        self.ln()
 
 # ---------------------------
 # Scan Button
@@ -133,7 +138,7 @@ if st.button("Scan"):
         scan_results.append({"page": frm['page'], "Form": res})
 
     # ---------------------------
-    # PDF Generation
+    # PDF Generation - OWASP Style
     # ---------------------------
     pdf = PDF()
     pdf.set_auto_page_break(auto=True, margin=15)
@@ -145,46 +150,54 @@ if st.button("Scan"):
     pdf.ln(10)
     pdf.set_font("Arial","",12)
     pdf.cell(0,8,f"URL Scanned: {safe_text(url)}",ln=True)
-    pdf.cell(0,8,f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",ln=True)
+    pdf.cell(0,8,f"Scan Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",ln=True)
     pdf.ln(10)
 
-    # --- Summary Page ---
+    # --- Executive Summary Table ---
     pdf.add_page()
     pdf.set_font("Arial","B",16)
-    pdf.cell(0,10,"Summary",ln=True)
+    pdf.cell(0,10,"Executive Summary",ln=True)
     pdf.ln(5)
 
     high = sum(1 for r in scan_results if any(severity_label(k,v)=="High" for k,v in r.items()))
     medium = sum(1 for r in scan_results if any(severity_label(k,v)=="Medium" for k,v in r.items()))
     low = sum(1 for r in scan_results if any(severity_label(k,v)=="Low" for k,v in r.items()))
 
-    pdf.set_font("Arial","",12)
-    pdf.cell(0,8,f"Total Pages Scanned: {len(scan_results)}",ln=True)
-    pdf.cell(0,8,f"High Severity Issues: {high}",ln=True)
-    pdf.cell(0,8,f"Medium Severity Issues: {medium}",ln=True)
-    pdf.cell(0,8,f"Low Severity Issues: {low}",ln=True)
+    pdf.set_font("Arial","B",12)
+    pdf.table_row(["Metric","Count"], [70,30], fill=True)
+    pdf.table_row(["Total Pages Scanned", str(len(scan_results))], [70,30])
+    pdf.table_row(["High Severity Issues", str(high)], [70,30], text_color=severity_color("High"))
+    pdf.table_row(["Medium Severity Issues", str(medium)], [70,30], text_color=severity_color("Medium"))
+    pdf.table_row(["Low Severity Issues", str(low)], [70,30], text_color=severity_color("Low"))
+
+    # --- Detailed Findings with alternating row colors ---
+    pdf.add_page()
+    pdf.set_font("Arial","B",14)
+    pdf.cell(0,10,"Detailed Findings",ln=True)
     pdf.ln(5)
 
-    # --- Detailed Findings ---
     for item in scan_results:
-        pdf.add_page()
-        pdf.set_font("Arial","B",14)
-        pdf.cell(0,10,f"Page: {safe_text(item.get('page'))}",ln=True)
-        pdf.ln(5)
+        pdf.set_font("Arial","B",12)
+        pdf.cell(0,8,f"Page: {safe_text(item.get('page'))}", ln=True)
+        pdf.ln(2)
+
+        # Table header
+        pdf.set_font("Arial","B",11)
+        pdf.set_fill_color(200,200,200)
+        pdf.table_row(["Vulnerability","Severity","Details"], [50,30,110], fill=True)
+
+        pdf.set_font("Arial","",11)
+        fill = False
         for k,v in item.items():
             if k=="page": continue
             sev = severity_label(k,v)
-            r,g,b = severity_color(sev)
-            pdf.set_text_color(r,g,b)
-            pdf.set_font("Arial","B",12)
-            pdf.cell(0,8,f"{k} - Severity: {sev}",ln=True)
-            pdf.set_text_color(0,0,0)
-            pdf.set_font("Arial","",11)
-            pdf.multi_cell(0,8,safe_text(v))
-            pdf.ln(3)
+            pdf.set_fill_color(245,245,245) if fill else pdf.set_fill_color(255,255,255)
+            pdf.table_row([k, sev, str(v)], [50,30,110], fill=fill, text_color=severity_color(sev))
+            fill = not fill
+        pdf.ln(3)
 
-    filename="scan_report.pdf"
+    filename="scan_report_owasp_style.pdf"
     pdf.output(filename)
-    st.success("✅ Scan Complete")
+    st.success("✅ OWASP-Style Professional Scan Complete")
     with open(filename,"rb") as f:
-        st.download_button("Download PDF Report",f,file_name=filename)
+        st.download_button("Download OWASP-Style PDF Report",f,file_name=filename)
