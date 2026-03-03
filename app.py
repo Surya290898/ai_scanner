@@ -64,7 +64,7 @@ class PDF(FPDF):
         super().__init__()
         self.font_family = font_family
     def header(self):
-        # header is safe now because font is registered before add_page()
+        # safe because font is pre-registered before first add_page()
         self.set_font(self.font_family, 'B', 16)
         self.cell(0, 10, "AI Website Security Scan Report", ln=True, align="C")
         self.ln(5)
@@ -139,9 +139,10 @@ if st.button("Scan"):
         if os.path.exists(FONT_PATH):
             pdf = PDF(font_family="DejaVuSans")
             pdf.add_font("DejaVuSans", "", FONT_PATH, uni=True)
+            st.success("Using DejaVuSans (Unicode-safe).")
         else:
             pdf = PDF(font_family="Arial")
-            st.warning("DejaVuSans.ttf not found. Using Arial (Unicode may fail).")
+            st.warning("DejaVuSans.ttf not found. Using Arial (may break Unicode).")
 
         # --- Cover Page ---
         pdf.add_page()
@@ -187,7 +188,9 @@ if st.button("Scan"):
                 pdf.set_text_color(r,g,b)
                 pdf.cell(50,8,k,border=1)
                 pdf.cell(30,8,sev,border=1)
-                pdf.multi_cell(0,8,str(v),border=1)
+                # Convert to str and replace unsupported unicode chars
+                text_safe = str(v).encode("latin-1", "replace").decode("latin-1")
+                pdf.multi_cell(0,8,text_safe,border=1)
             pdf.set_text_color(0,0,0)
 
         # --- Output PDF ---
