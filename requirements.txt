@@ -2,5 +2,5 @@ streamlit
 requests
 beautifulsoup4
 fpdf2
-pillow
 selenium
+pillow
