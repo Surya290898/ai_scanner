@@ -22,23 +22,22 @@ if st.button("Scan"):
 
         # Store results for PDF
         scan_results = []
-
-        # Thread-safe list append
         lock = threading.Lock()
 
-        def scan_page(page):
-            page_result = {"page": page, "SQLi": None, "XSS": None, "AI": None}
-            # SQLi test
-            if test_sqli(page):
-                page_result["SQLi"] = "⚠️ Possible SQL Injection"
-            else:
-                page_result["SQLi"] = "No SQL Injection"
+        # Container for real-time updates
+        page_container = st.container()
+        progress_bar = st.progress(0)
+        total_pages = len(pages)
+        completed_pages = 0
 
+        def scan_page(page):
+            nonlocal completed_pages
+            page_result = {"page": page, "SQLi": None, "XSS": None, "AI": None}
+
+            # SQLi test
+            page_result["SQLi"] = "⚠️ Possible SQL Injection" if test_sqli(page) else "No SQL Injection"
             # XSS test
-            if test_xss(page):
-                page_result["XSS"] = "⚠️ Possible XSS"
-            else:
-                page_result["XSS"] = "No XSS"
+            page_result["XSS"] = "⚠️ Possible XSS" if test_xss(page) else "No XSS"
 
             # AI analysis
             try:
@@ -50,10 +49,13 @@ if st.button("Scan"):
             # Append result safely
             with lock:
                 scan_results.append(page_result)
+                completed_pages += 1
+                progress_bar.progress(completed_pages / total_pages)
 
-            # Display on Streamlit
-            st.write(f"Page: {page}")
-            st.write(page_result)
+            # Display dynamically
+            with page_container:
+                st.write(f"### Page: {page}")
+                st.json(page_result)
 
         # Multi-threaded scanning
         threads = []
@@ -68,10 +70,11 @@ if st.button("Scan"):
         st.write("📝 Testing forms...")
         for form in forms:
             result = test_form(form)
-            st.write(f"Form on {form['page']}: {result}")
+            st.write(f"Form on {form['page']}:")
+            st.json(result)
             scan_results.append({"page": form['page'], "form_result": result})
 
-        # Generate PDF report (Unicode-safe)
+        # Generate Unicode-safe PDF report
         pdf = FPDF()
         pdf.add_page()
         pdf.set_font("Arial", "B", 16)
@@ -80,12 +83,13 @@ if st.button("Scan"):
 
         for res in scan_results:
             pdf.ln(5)
-            # Replace unsupported characters to avoid crash
             safe_text = str(res).encode("latin-1", "replace").decode("latin-1")
             pdf.multi_cell(0, 8, safe_text)
 
         pdf_file = "scan_report.pdf"
         pdf.output(pdf_file)
-        st.success(f"✅ PDF report generated: {pdf_file}")
+
+        st.success("✅ Scanning complete!")
+        st.success(f"PDF report generated: {pdf_file}")
         with open(pdf_file, "rb") as f:
             st.download_button("Download PDF Report", f, file_name="scan_report.pdf")
