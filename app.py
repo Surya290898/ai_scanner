@@ -57,12 +57,13 @@ def severity_color(sev):
     return (0,0,0)
 
 # ---------------------------
-# PDF Class
+# PDF Class (stable)
 # ---------------------------
 class PDF(FPDF):
     def __init__(self, font_family="Arial"):
         super().__init__()
-        self.font_family = font_family  # Initialize font_family before add_page()
+        self.font_family = font_family  # initialize before add_page()
+
     def header(self):
         self.set_font(self.font_family, 'B', 16)
         self.cell(0, 10, "AI Website Security Scan Report", ln=True, align="C")
@@ -132,9 +133,8 @@ if st.button("Scan"):
             scan_results.append({"page": frm['page'], "Form": res})
 
         # ---------------------------
-        # Generate PDF
+        # Determine PDF font
         # ---------------------------
-        # --- Determine font ---
         FONT_PATH = "fonts/DejaVuSans.ttf"
         if os.path.exists(FONT_PATH):
             pdf = PDF(font_family="DejaVuSans")
@@ -143,7 +143,9 @@ if st.button("Scan"):
             pdf = PDF(font_family="Arial")
             st.warning("DejaVuSans.ttf not found. Using Arial (Unicode may fail).")
 
+        # ---------------------------
         # Cover Page
+        # ---------------------------
         pdf.add_page()
         pdf.set_font(pdf.font_family,'B',20)
         pdf.cell(0,15,"AI Website Security Scanner Report",ln=True,align="C")
@@ -153,7 +155,9 @@ if st.button("Scan"):
         pdf.cell(0,8,f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",ln=True)
         pdf.ln(10)
 
+        # ---------------------------
         # Summary Page
+        # ---------------------------
         pdf.add_page()
         pdf.set_font(pdf.font_family,'B',16)
         pdf.cell(0,10,"Summary",ln=True)
@@ -169,7 +173,9 @@ if st.button("Scan"):
         pdf.cell(0,8,f"Low Severity Issues: {low}",ln=True)
         pdf.ln(5)
 
+        # ---------------------------
         # Detailed Findings
+        # ---------------------------
         for item in scan_results:
             pdf.add_page()
             pdf.set_font(pdf.font_family,'B',14)
@@ -190,6 +196,9 @@ if st.button("Scan"):
                 pdf.multi_cell(0,8,str(v),border=1)
             pdf.set_text_color(0,0,0) # reset color
 
+        # ---------------------------
+        # Output PDF
+        # ---------------------------
         fname="scan_report_final.pdf"
         pdf.output(fname)
         st.success("✅ Scanning complete!")
