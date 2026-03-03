@@ -7,7 +7,8 @@ import requests
 import threading
 from fpdf import FPDF
 
-st.title("🛡 AI Website Security Scanner (Free Advanced)")
+st.set_page_config(page_title="AI Website Security Scanner", layout="wide")
+st.title("🛡 AI Website Security Scanner (Unicode-safe)")
 
 url = st.text_input("Enter your website URL (include https://)")
 
@@ -22,25 +23,35 @@ if st.button("Scan"):
         # Store results for PDF
         scan_results = []
 
+        # Thread-safe list append
+        lock = threading.Lock()
+
         def scan_page(page):
             page_result = {"page": page, "SQLi": None, "XSS": None, "AI": None}
+            # SQLi test
             if test_sqli(page):
                 page_result["SQLi"] = "⚠️ Possible SQL Injection"
             else:
                 page_result["SQLi"] = "No SQL Injection"
 
+            # XSS test
             if test_xss(page):
                 page_result["XSS"] = "⚠️ Possible XSS"
             else:
                 page_result["XSS"] = "No XSS"
 
+            # AI analysis
             try:
                 response = requests.get(page, timeout=5)
                 page_result["AI"] = analyze_response(response.text)
             except:
                 page_result["AI"] = "Failed AI analysis"
 
-            scan_results.append(page_result)
+            # Append result safely
+            with lock:
+                scan_results.append(page_result)
+
+            # Display on Streamlit
             st.write(f"Page: {page}")
             st.write(page_result)
 
@@ -60,16 +71,18 @@ if st.button("Scan"):
             st.write(f"Form on {form['page']}: {result}")
             scan_results.append({"page": form['page'], "form_result": result})
 
-        # Generate PDF report
+        # Generate PDF report (Unicode-safe)
         pdf = FPDF()
         pdf.add_page()
         pdf.set_font("Arial", "B", 16)
         pdf.cell(0, 10, "AI Website Security Scan Report", ln=True, align="C")
-        pdf.set_font("Arial", "", 12)
+        pdf.set_font("Arial", size=12)
 
         for res in scan_results:
             pdf.ln(5)
-            pdf.multi_cell(0, 8, str(res))
+            # Replace unsupported characters to avoid crash
+            safe_text = str(res).encode("latin-1", "replace").decode("latin-1")
+            pdf.multi_cell(0, 8, safe_text)
 
         pdf_file = "scan_report.pdf"
         pdf.output(pdf_file)
