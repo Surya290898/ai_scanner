@@ -5,17 +5,15 @@ from scanner import test_sqli, test_xss, test_form
 from ai_engine import analyze_response
 import requests
 import threading
-from fpdf import FPDF
-from datetime import datetime
 import csv
 
 st.set_page_config(page_title="AI Website Security Scanner", layout="wide")
-st.title("🛡 AI Website Security Scanner (Startup MVP)")
+st.title("🛡 AI Website Security Scanner (MVP)")
 
 url = st.text_input("Enter your website URL (include https://)")
 
 # -------------------------------
-# Safe text for PDF (ASCII only)
+# Safe Text
 # -------------------------------
 def safe_text(text):
     if not text:
@@ -24,7 +22,7 @@ def safe_text(text):
     replacements = {"⚠️": "WARNING:", "✅": "OK:", "—": "-", "…": "..."}
     for k, v in replacements.items():
         text = text.replace(k, v)
-    return text.encode("latin-1", "replace").decode("latin-1")
+    return text
 
 # -------------------------------
 # CSP Evaluation
@@ -41,7 +39,7 @@ def evaluate_csp_header(csp_header: str):
     return "Strong CSP configuration" if not warnings else "Weak CSP: " + ", ".join(warnings)
 
 # -------------------------------
-# Severity Logic
+# Severity
 # -------------------------------
 def severity_label(issue_type, result):
     if not result or "No" in str(result): return "None"
@@ -56,15 +54,6 @@ def severity_color(sev):
     if sev == "Medium": return (255, 140, 0)
     if sev == "Low": return (0, 128, 0)
     return (0, 0, 0)
-
-# -------------------------------
-# PDF Class
-# -------------------------------
-class PDF(FPDF):
-    def header(self):
-        self.set_font("Arial", "B", 16)
-        self.cell(0, 10, "AI Website Security Scan Report", ln=True, align="C")
-        self.ln(5)
 
 # -------------------------------
 # Scan Button
@@ -90,7 +79,6 @@ if st.button("Scan"):
         page_res = {"page": page}
         page_res["SQLi"] = "Possible SQL Injection" if test_sqli(page) else "No SQL Injection"
         page_res["XSS"] = "Possible XSS" if test_xss(page) else "No XSS"
-
         try:
             response = requests.get(page, timeout=5)
             page_res["AI"] = analyze_response(response.text)
@@ -107,6 +95,7 @@ if st.button("Scan"):
         with lock:
             scan_results.append(page_res)
             progress_bar.progress(len(scan_results) / total_pages)
+
         st.write(f"Scanned: {page}")
         st.json(page_res)
 
@@ -137,7 +126,6 @@ if st.button("Scan"):
             if sev == "High": high += 1
             elif sev == "Medium": medium += 1
             elif sev == "Low": low += 1
-
     risk_score = high*10 + medium*5 + low*2
     if risk_score >= 50: risk_level = "Critical"
     elif risk_score >= 30: risk_level = "High"
@@ -149,9 +137,9 @@ if st.button("Scan"):
     # -------------------------------
     st.subheader("Scan Summary")
     col1, col2, col3, col4 = st.columns(4)
-    col1.metric("High Severity", high, delta_color="inverse")
-    col2.metric("Medium Severity", medium, delta_color="inverse")
-    col3.metric("Low Severity", low, delta_color="inverse")
+    col1.metric("High Severity", high)
+    col2.metric("Medium Severity", medium)
+    col3.metric("Low Severity", low)
     col4.metric("Risk Score", risk_score, risk_level)
 
     # -------------------------------
@@ -172,57 +160,8 @@ if st.button("Scan"):
                     "severity": severity_label(k, v),
                     "details": str(v)
                 })
+
     with open(csv_filename, "rb") as f:
         st.download_button("Download CSV Report", f, file_name=csv_filename)
 
-    # -------------------------------
-    # PDF Generation
-    # -------------------------------
-    pdf = PDF()
-    pdf.set_auto_page_break(auto=True, margin=15)
-
-    # Cover Page
-    pdf.add_page()
-    pdf.set_font("Arial", "B", 20)
-    pdf.cell(0, 15, "AI Website Security Scanner Report", ln=True, align="C")
-    pdf.ln(10)
-    pdf.set_font("Arial", "", 12)
-    pdf.cell(0, 8, f"Target URL: {safe_text(url)}", ln=True)
-    pdf.cell(0, 8, f"Scan Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", ln=True)
-    pdf.cell(0, 8, f"Overall Risk Score: {risk_score} ({risk_level})", ln=True)
-
-    # Executive Summary
-    pdf.add_page()
-    pdf.set_font("Arial", "B", 16)
-    pdf.cell(0, 10, "Executive Summary", ln=True)
-    pdf.ln(5)
-    pdf.set_font("Arial", "", 12)
-    pdf.cell(0, 8, f"Total Pages/Forms Scanned: {len(scan_results)}", ln=True)
-    pdf.cell(0, 8, f"High Severity Issues: {high}", ln=True)
-    pdf.cell(0, 8, f"Medium Severity Issues: {medium}", ln=True)
-    pdf.cell(0, 8, f"Low Severity Issues: {low}", ln=True)
-
-    # Detailed Findings
-    for item in scan_results:
-        pdf.add_page()
-        pdf.set_font("Arial", "B", 14)
-        pdf.cell(0, 10, f"Page: {safe_text(item.get('page'))}", ln=True)
-        pdf.ln(5)
-
-        for k, v in item.items():
-            if k == "page": continue
-            sev = severity_label(k, v)
-            r, g, b = severity_color(sev)
-            pdf.set_text_color(r, g, b)
-            pdf.set_font("Arial", "B", 12)
-            pdf.multi_cell(0, 8, f"{k} - Severity: {sev}")
-            pdf.set_text_color(0, 0, 0)
-            pdf.set_font("Arial", "", 11)
-            pdf.multi_cell(0, 8, safe_text(v))
-            pdf.ln(3)
-
-    pdf_filename = "scan_report.pdf"
-    pdf.output(pdf_filename)
-    st.success("✅ Scan Complete!")
-    with open(pdf_filename, "rb") as f:
-        st.download_button("Download PDF Report", f, file_name=pdf_filename)
+    st.success("✅ Scan Complete! PDF removed to avoid FPDF issues.")
