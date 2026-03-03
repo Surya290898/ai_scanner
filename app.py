@@ -7,16 +7,16 @@ import threading
 from fpdf import FPDF
 from datetime import datetime
 
-st.set_page_config(page_title="AI Website Security Scanner", layout="wide")
-st.title("AI Website Security Scanner")
+st.set_page_config(page_title="Website Security Scanner", layout="wide")
+st.title("Website Security Scanner")
 
 url = st.text_input("Enter your website URL (include https://)")
 
 # ===============================
-# Safe PDF Text (ASCII only)
+# Safe PDF Text
 # ===============================
 def safe_text(text, max_len=500):
-    """Convert any text to PDF-safe ASCII text and truncate."""
+    """Convert text to PDF-safe ASCII text and truncate long lines."""
     if not text:
         return ""
     text = str(text)
@@ -64,19 +64,43 @@ def severity_color(sev):
     if sev == "High":
         return (255, 0, 0)
     if sev == "Medium":
-        return (255, 140, 0)
+        return (255, 165, 0)
     if sev == "Low":
         return (0, 128, 0)
     return (0, 0, 0)
 
+def severity_fill_color(sev):
+    if sev == "High":
+        return (255, 200, 200)
+    if sev == "Medium":
+        return (255, 230, 180)
+    if sev == "Low":
+        return (200, 255, 200)
+    return (255, 255, 255)
+
 # ===============================
-# PDF Class
+# PDF Class with Table
 # ===============================
 class PDF(FPDF):
     def header(self):
         self.set_font("Arial", "B", 16)
         self.cell(0, 10, "Website Security Scan Report", ln=True, align="C")
         self.ln(5)
+
+    def table_row(self, row_data, col_widths, colors=None):
+        """Draw one row with optional background color for each cell."""
+        max_height = 8
+        self.set_font("Arial", "", 11)
+        for i, text in enumerate(row_data):
+            fill_color = (255, 255, 255)
+            if colors and colors[i]:
+                fill_color = colors[i]
+            self.set_fill_color(*fill_color)
+            self.multi_cell(col_widths[i], max_height, safe_text(str(text)), border=1, ln=3, fill=True, max_line_height=self.font_size)
+            x = self.get_x()
+            y = self.get_y()
+            self.set_xy(x + col_widths[i], y - max_height)
+        self.ln(max_height)
 
 # ===============================
 # Scan Button
@@ -88,7 +112,7 @@ if st.button("Scan"):
         st.stop()
 
     st.info("Crawling website...")
-    pages, _ = crawl(url)  # no forms scanning here
+    pages, _ = crawl(url)
     st.success(f"Found {len(pages)} pages!")
 
     scan_results = []
@@ -101,10 +125,8 @@ if st.button("Scan"):
     # ---------------------------
     def scan_page(page):
         page_res = {"page": page}
-
         page_res["SQLi"] = "Possible SQL Injection" if test_sqli(page) else "No SQL Injection"
         page_res["XSS"] = "Possible XSS" if test_xss(page) else "No XSS"
-
         try:
             resp = requests.get(page, timeout=5)
             csp_header = resp.headers.get("Content-Security-Policy", "")
@@ -128,7 +150,7 @@ if st.button("Scan"):
         t.join()
 
     # ---------------------------
-    # PDF Generation (Safe)
+    # PDF Generation
     # ---------------------------
     pdf = PDF()
     pdf.set_auto_page_break(auto=True, margin=15)
@@ -164,30 +186,33 @@ if st.button("Scan"):
     pdf.cell(0, 8, f"High Severity Issues: {high}", ln=True)
     pdf.cell(0, 8, f"Medium Severity Issues: {medium}", ln=True)
 
-    # --- Detailed Findings ---
-    for item in scan_results:
-        pdf.add_page()
-        pdf.set_font("Arial", "B", 14)
-        pdf.cell(0, 10, f"Page: {safe_text(item.get('page'))}", ln=True)
-        pdf.ln(5)
+    # --- Detailed Findings Table ---
+    pdf.add_page()
+    pdf.set_font("Arial", "B", 14)
+    pdf.cell(0, 10, "Detailed Findings", ln=True)
+    pdf.ln(5)
 
-        for k, v in item.items():
-            if k == "page":
+    col_widths = [60, 40, 80]  # Page | Issue | Result
+    pdf.set_font("Arial", "B", 12)
+    pdf.set_fill_color(200, 200, 200)
+    headers = ["Page", "Issue", "Result"]
+    pdf.table_row(headers, col_widths, colors=[(200,200,200)]*3)
+
+    pdf.set_font("Arial", "", 11)
+    for item in scan_results:
+        page = item["page"]
+        for issue_type in ["SQLi", "XSS", "CSP"]:
+            if issue_type not in item:
                 continue
-            sev = severity_label(k, v)
-            r, g, b = severity_color(sev)
-            pdf.set_text_color(r, g, b)
-            pdf.set_font("Arial", "B", 12)
-            pdf.cell(0, 8, f"{k} - Severity: {sev}", ln=True)
-            pdf.set_text_color(0, 0, 0)
-            pdf.set_font("Arial", "", 11)
-            pdf.cell(0, 8, safe_text(v), ln=True)
-            pdf.ln(2)
+            result = item[issue_type]
+            sev = severity_label(issue_type, result)
+            color = severity_fill_color(sev)
+            pdf.table_row([page, issue_type, result], col_widths, colors=[None, color, None])
 
     # --- Output PDF ---
     filename = "scan_report.pdf"
     pdf.output(filename)
-    st.success("Scan Complete!")
+    st.success("Scan Complete! Download your professional report below:")
 
     with open(filename, "rb") as f:
         st.download_button("Download PDF Report", f, file_name=filename)
