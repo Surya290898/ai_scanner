@@ -1,26 +1,27 @@
-# ai_engine.py
 import requests
+import os
 
-# HuggingFace free API (replace with your token)
-API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.1"
-HEADERS = {"Authorization": "Bearer YOUR_API_KEY"}
+HF_TOKEN = os.getenv("HF_TOKEN")  # Store token securely in Streamlit secrets
 
-def analyze_response(response_text):
-    """
-    AI analyzes HTTP response for vulnerabilities.
-    """
-    prompt = f"""
-    Analyze this HTTP response for vulnerabilities and business logic issues.
-    Look for workflow flaws like skipping steps, duplicate actions, or unexpected behavior.
-    If safe, reply 'No vulnerabilities found.'
-    Response snippet:
-    {response_text[:1000]}
-    """
+API_URL = "https://router.huggingface.co/hf-inference/models/facebook/bart-large-mnli"
+
+headers = {
+    "Authorization": f"Bearer {HF_TOKEN}"
+}
+
+def analyze_response(text):
+
+    payload = {
+        "inputs": text[:1000]  # limit text size
+    }
+
     try:
-        response = requests.post(API_URL, headers=HEADERS, json={"inputs": prompt})
-        result = response.json()
-        if isinstance(result, list) and "generated_text" in result[0]:
-            return result[0]["generated_text"]
-        return str(result)
+        response = requests.post(API_URL, headers=headers, json=payload, timeout=10)
+
+        if response.status_code != 200:
+            return f"AI API Error: {response.json()}"
+
+        return str(response.json())[:500]
+
     except Exception as e:
-        return f"AI analysis failed: {e}"
+        return f"AI analysis failed: {str(e)}"
