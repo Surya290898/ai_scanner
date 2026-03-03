@@ -12,6 +12,35 @@ st.title("🛡 AI Website Security Scanner (Unicode-safe)")
 
 url = st.text_input("Enter your website URL (include https://)")
 
+# ---------------------------
+# CSP Evaluation Function
+# ---------------------------
+def evaluate_csp_header(csp_header: str):
+    """
+    Evaluate a CSP header string and return a security warning if weak.
+    """
+    if not csp_header:
+        return "⚠️ No Content-Security-Policy header found"
+
+    warnings = []
+    csp = csp_header.lower()
+
+    if "unsafe-inline" in csp:
+        warnings.append("contains 'unsafe-inline'")
+    if "unsafe-eval" in csp:
+        warnings.append("contains 'unsafe-eval'")
+    if "* " in csp or "*;" in csp:
+        warnings.append("contains wildcard '*' in policy")
+    if "script-src" not in csp and "default-src" not in csp:
+        warnings.append("no script-src or default-src directive")
+
+    if not warnings:
+        return f"✅ Strong CSP: {csp_header}"
+    return f"⚠️ Weak CSP ({', '.join(warnings)}): {csp_header}"
+
+# ---------------------------
+# Scan Button
+# ---------------------------
 if st.button("Scan"):
     if not url.startswith("http"):
         st.error("Please enter a valid URL including http:// or https://")
@@ -24,16 +53,19 @@ if st.button("Scan"):
         scan_results = []
         lock = threading.Lock()
 
-        # Container for real-time page updates
+        # Container for real-time updates
         page_container = st.container()
         progress_bar = st.progress(0)
         total_pages = len(pages)
-        progress = {"completed": 0}  # Mutable dictionary for thread-safe counting
+        progress = {"completed": 0}  # mutable dict for thread-safe counting
 
+        # ---------------------------
+        # Page Scanning Function
+        # ---------------------------
         def scan_page(page):
-            page_result = {"page": page, "SQLi": None, "XSS": None, "AI": None}
+            page_result = {"page": page, "SQLi": None, "XSS": None, "AI": None, "CSP": None}
 
-            # SQL Injection test
+            # SQLi test
             page_result["SQLi"] = "⚠️ Possible SQL Injection" if test_sqli(page) else "No SQL Injection"
             # XSS test
             page_result["XSS"] = "⚠️ Possible XSS" if test_xss(page) else "No XSS"
@@ -45,18 +77,28 @@ if st.button("Scan"):
             except:
                 page_result["AI"] = "Failed AI analysis"
 
-            # Append result and update progress safely
+            # CSP header evaluation
+            try:
+                resp = requests.get(page, timeout=5)
+                csp_header = resp.headers.get("Content-Security-Policy", "")
+                page_result["CSP"] = evaluate_csp_header(csp_header)
+            except:
+                page_result["CSP"] = "Failed to fetch page for CSP"
+
+            # Append results and update progress safely
             with lock:
                 scan_results.append(page_result)
                 progress["completed"] += 1
                 progress_bar.progress(progress["completed"] / total_pages)
 
-            # Display per-page result in Streamlit
+            # Display per-page results
             with page_container:
                 st.write(f"### Page: {page}")
                 st.json(page_result)
 
-        # Multi-threaded scanning
+        # ---------------------------
+        # Start Multi-threaded Scan
+        # ---------------------------
         threads = []
         for page in pages:
             t = threading.Thread(target=scan_page, args=(page,))
@@ -65,7 +107,9 @@ if st.button("Scan"):
         for t in threads:
             t.join()
 
-        # Form testing
+        # ---------------------------
+        # Form Testing
+        # ---------------------------
         st.write("📝 Testing forms...")
         for form in forms:
             result = test_form(form)
@@ -73,7 +117,9 @@ if st.button("Scan"):
             st.json(result)
             scan_results.append({"page": form['page'], "form_result": result})
 
-        # Generate Unicode-safe PDF report
+        # ---------------------------
+        # Generate Unicode-safe PDF
+        # ---------------------------
         pdf = FPDF()
         pdf.add_page()
         pdf.set_font("Arial", "B", 16)
