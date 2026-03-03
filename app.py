@@ -7,10 +7,9 @@ import requests
 import threading
 from fpdf import FPDF
 from datetime import datetime
-import os
 
 st.set_page_config(page_title="AI Website Security Scanner", layout="wide")
-st.title("🛡 AI Website Security Scanner (Professional Report)")
+st.title("🛡 AI Website Security Scanner (Stable PDF)")
 
 url = st.text_input("Enter your website URL (include https://)")
 
@@ -61,10 +60,7 @@ def severity_color(sev):
 # ---------------------------
 class PDF(FPDF):
     def header(self):
-        try:
-            self.set_font(self.font_family, 'B', 16)
-        except:
-            self.set_font("Arial", 'B', 16)
+        self.set_font("Arial", 'B', 16)
         self.cell(0, 10, "AI Website Security Scan Report", ln=True, align="C")
         self.ln(5)
 
@@ -136,35 +132,26 @@ if st.button("Scan"):
         # ---------------------------
         pdf = PDF()
 
-        # --- Font registration BEFORE any page ---
-        FONT_PATH = "fonts/DejaVuSans.ttf"
-        if os.path.exists(FONT_PATH):
-            pdf.add_font("DejaVuSans", "", FONT_PATH, uni=True)
-            pdf.font_family = "DejaVuSans"
-        else:
-            pdf.font_family = "Arial"
-            st.warning("DejaVuSans.ttf not found. PDF will use default Arial font.")
-
         # Cover Page
         pdf.add_page()
-        pdf.set_font(pdf.font_family,'B',20)
+        pdf.set_font("Arial", 'B', 20)
         pdf.cell(0,15,"AI Website Security Scanner Report",ln=True,align="C")
         pdf.ln(10)
-        pdf.set_font(pdf.font_family,'',12)
+        pdf.set_font("Arial", '', 12)
         pdf.cell(0,8,f"URL Scanned: {url}",ln=True)
         pdf.cell(0,8,f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",ln=True)
         pdf.ln(10)
 
         # Summary Page
         pdf.add_page()
-        pdf.set_font(pdf.font_family,'B',16)
+        pdf.set_font("Arial",'B',16)
         pdf.cell(0,10,"Summary",ln=True)
         pdf.ln(5)
         total_pages_count=len(scan_results)
         high=sum(1 for r in scan_results if "High" in r.values())
         medium=sum(1 for r in scan_results if "Medium" in r.values())
         low=sum(1 for r in scan_results if "Low" in r.values())
-        pdf.set_font(pdf.font_family,'',12)
+        pdf.set_font("Arial",'',12)
         pdf.cell(0,8,f"Total Pages Scanned: {total_pages_count}",ln=True)
         pdf.cell(0,8,f"High Severity Issues: {high}",ln=True)
         pdf.cell(0,8,f"Medium Severity Issues: {medium}",ln=True)
@@ -174,14 +161,14 @@ if st.button("Scan"):
         # Detailed Findings
         for item in scan_results:
             pdf.add_page()
-            pdf.set_font(pdf.font_family,'B',14)
+            pdf.set_font("Arial",'B',14)
             pdf.cell(0,10,f"Page: {item.get('page','')}",ln=True)
             pdf.ln(2)
-            pdf.set_font(pdf.font_family,'B',12)
+            pdf.set_font("Arial",'B',12)
             pdf.cell(50,8,"Vulnerability",border=1)
             pdf.cell(30,8,"Severity",border=1)
             pdf.cell(0,8,"Details",border=1,ln=True)
-            pdf.set_font(pdf.font_family,'',12)
+            pdf.set_font("Arial",'',12)
             for k,v in item.items():
                 if k=="page": continue
                 sev=severity_label(k,v)
@@ -192,7 +179,7 @@ if st.button("Scan"):
                 pdf.multi_cell(0,8,str(v),border=1)
             pdf.set_text_color(0,0,0) # reset color
 
-        fname="scan_report_professional.pdf"
+        fname="scan_report_stable.pdf"
         pdf.output(fname)
         st.success("✅ Scanning complete!")
         with open(fname,"rb") as f:
