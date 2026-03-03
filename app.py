@@ -8,39 +8,45 @@ import threading
 from fpdf import FPDF
 
 st.set_page_config(page_title="AI Website Security Scanner", layout="wide")
-st.title("🛡 AI Website Security Scanner (Unicode-safe)")
+st.title("🛡 AI Website Security Scanner (UTF-8 PDF)")
 
 url = st.text_input("Enter your website URL (include https://)")
 
 # ---------------------------
-# CSP Evaluation Function
+# CSP Evaluation
 # ---------------------------
 def evaluate_csp_header(csp_header: str):
     """
-    Evaluate a CSP header string and return a security warning if weak.
+    Check CSP and give best practice remediation
     """
     if not csp_header:
-        return "⚠️ No Content-Security-Policy header found"
-
+        return "⚠️ No Content-Security-Policy header found — add a strict CSP."
+    
     warnings = []
     csp = csp_header.lower()
 
     if "unsafe-inline" in csp:
-        warnings.append("contains 'unsafe-inline'")
+        warnings.append("avoid 'unsafe-inline', use nonces or hashes instead")
     if "unsafe-eval" in csp:
-        warnings.append("contains 'unsafe-eval'")
+        warnings.append("avoid 'unsafe-eval', restrict scripts")
     if "* " in csp or "*;" in csp:
-        warnings.append("contains wildcard '*' in policy")
-    if "script-src" not in csp and "default-src" not in csp:
-        warnings.append("no script-src or default-src directive")
+        warnings.append("avoid wildcard '*' in directives")
 
     if not warnings:
         return f"✅ Strong CSP: {csp_header}"
-    return f"⚠️ Weak CSP ({', '.join(warnings)}): {csp_header}"
+    # Add remediation guide
+    guide = ", ".join(warnings)
+    return f"⚠️ Weak CSP: {guide}. Suggested: default-src 'self'; script-src 'self' 'nonce-<random>'; img-src 'self'; style-src 'self';"
 
 # ---------------------------
-# Scan Button
+# PDF Class with UTF-8 Support
 # ---------------------------
+class PDF(FPDF):
+    def header(self):
+        self.set_font("DejaVuSans", size=14)
+        self.cell(0, 10, "AI Website Security Scan Report", ln=True, align="C")
+        self.ln(5)
+
 if st.button("Scan"):
     if not url.startswith("http"):
         st.error("Please enter a valid URL including http:// or https://")
@@ -49,92 +55,86 @@ if st.button("Scan"):
         pages, forms = crawl(url)
         st.success(f"Found {len(pages)} pages and {len(forms)} forms!")
 
-        # Store results for PDF
         scan_results = []
         lock = threading.Lock()
 
-        # Container for real-time updates
+        # Containers
         page_container = st.container()
         progress_bar = st.progress(0)
         total_pages = len(pages)
-        progress = {"completed": 0}  # mutable dict for thread-safe counting
+        progress = {"completed": 0}
 
-        # ---------------------------
-        # Page Scanning Function
-        # ---------------------------
         def scan_page(page):
-            page_result = {"page": page, "SQLi": None, "XSS": None, "AI": None, "CSP": None}
+            page_res = {
+                "page": page,
+                "SQLi": None,
+                "XSS": None,
+                "AI": None,
+                "CSP": None
+            }
 
-            # SQLi test
-            page_result["SQLi"] = "⚠️ Possible SQL Injection" if test_sqli(page) else "No SQL Injection"
-            # XSS test
-            page_result["XSS"] = "⚠️ Possible XSS" if test_xss(page) else "No XSS"
+            page_res["SQLi"] = (
+                "⚠️ Possible SQL Injection" if test_sqli(page) else "No SQL Injection"
+            )
+            page_res["XSS"] = (
+                "⚠️ Possible XSS" if test_xss(page) else "No XSS"
+            )
 
-            # AI business logic analysis
             try:
                 response = requests.get(page, timeout=5)
-                page_result["AI"] = analyze_response(response.text)
+                page_res["AI"] = analyze_response(response.text)
             except:
-                page_result["AI"] = "Failed AI analysis"
+                page_res["AI"] = "Failed AI"
 
-            # CSP header evaluation
             try:
                 resp = requests.get(page, timeout=5)
                 csp_header = resp.headers.get("Content-Security-Policy", "")
-                page_result["CSP"] = evaluate_csp_header(csp_header)
+                page_res["CSP"] = evaluate_csp_header(csp_header)
             except:
-                page_result["CSP"] = "Failed to fetch page for CSP"
+                page_res["CSP"] = "Failed CSP check"
 
-            # Append results and update progress safely
             with lock:
-                scan_results.append(page_result)
+                scan_results.append(page_res)
                 progress["completed"] += 1
                 progress_bar.progress(progress["completed"] / total_pages)
 
-            # Display per-page results
             with page_container:
                 st.write(f"### Page: {page}")
-                st.json(page_result)
+                st.json(page_res)
 
-        # ---------------------------
-        # Start Multi-threaded Scan
-        # ---------------------------
         threads = []
-        for page in pages:
-            t = threading.Thread(target=scan_page, args=(page,))
+        for pg in pages:
+            t = threading.Thread(target=scan_page, args=(pg,))
             t.start()
             threads.append(t)
         for t in threads:
             t.join()
 
-        # ---------------------------
-        # Form Testing
-        # ---------------------------
-        st.write("📝 Testing forms...")
-        for form in forms:
-            result = test_form(form)
-            st.write(f"Form on {form['page']}:")
-            st.json(result)
-            scan_results.append({"page": form['page'], "form_result": result})
+        st.write("📝 Testing forms…")
+        for frm in forms:
+            res = test_form(frm)
+            st.write(f"Form on {frm['page']}:")
+            st.json(res)
+            scan_results.append({"page": frm['page'], "form_result": res})
 
         # ---------------------------
-        # Generate Unicode-safe PDF
+        # Generate UTF-8 PDF
         # ---------------------------
-        pdf = FPDF()
+        pdf = PDF()
         pdf.add_page()
-        pdf.set_font("Arial", "B", 16)
-        pdf.cell(0, 10, "AI Website Security Scan Report", ln=True, align="C")
-        pdf.set_font("Arial", size=12)
 
-        for res in scan_results:
-            pdf.ln(5)
-            safe_text = str(res).encode("latin-1", "replace").decode("latin-1")
-            pdf.multi_cell(0, 8, safe_text)
+        # Load Unicode font (e.g., DejaVu Sans)
+        pdf.add_font("DejaVuSans", "", "fonts/DejaVuSans.ttf", uni=True)
+        pdf.set_font("DejaVuSans", size=12)
 
-        pdf_file = "scan_report.pdf"
-        pdf.output(pdf_file)
+        for item in scan_results:
+            # Write each result
+            pdf.multi_cell(0, 8, str(item))
+            pdf.ln(3)
+
+        fname = "scan_report_utf8.pdf"
+        pdf.output(fname)
 
         st.success("✅ Scanning complete!")
-        st.success(f"PDF report generated: {pdf_file}")
-        with open(pdf_file, "rb") as f:
-            st.download_button("Download PDF Report", f, file_name="scan_report.pdf")
+        with open(fname, "rb") as f:
+            st.download_button("Download UTF-8 PDF Report", f, file_name=fname)
