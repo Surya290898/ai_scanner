@@ -40,11 +40,11 @@ def evaluate_csp_header(csp_header: str):
     return f"⚠️ Weak CSP: {guide}. Suggested: default-src 'self'; script-src 'self' 'nonce-<random>'; img-src 'self'; style-src 'self';"
 
 # ---------------------------
-# PDF Class with UTF-8 support
+# PDF Class
 # ---------------------------
 class PDF(FPDF):
     def header(self):
-        self.set_font("DejaVuSans", size=14)
+        self.set_font(self.font_family, size=14)
         self.cell(0, 10, "AI Website Security Scan Report", ln=True, align="C")
         self.ln(5)
 
@@ -69,19 +69,15 @@ if st.button("Scan"):
         def scan_page(page):
             page_res = {"page": page, "SQLi": None, "XSS": None, "AI": None, "CSP": None}
 
-            # SQLi test
             page_res["SQLi"] = "⚠️ Possible SQL Injection" if test_sqli(page) else "No SQL Injection"
-            # XSS test
             page_res["XSS"] = "⚠️ Possible XSS" if test_xss(page) else "No XSS"
 
-            # AI business logic analysis
             try:
                 response = requests.get(page, timeout=5)
                 page_res["AI"] = analyze_response(response.text)
             except:
                 page_res["AI"] = "Failed AI analysis"
 
-            # CSP header evaluation
             try:
                 resp = requests.get(page, timeout=5)
                 csp_header = resp.headers.get("Content-Security-Policy", "")
@@ -89,13 +85,11 @@ if st.button("Scan"):
             except:
                 page_res["CSP"] = "Failed CSP check"
 
-            # Append result and update progress
             with lock:
                 scan_results.append(page_res)
                 progress["completed"] += 1
                 progress_bar.progress(progress["completed"] / total_pages)
 
-            # Display per-page result
             with page_container:
                 st.write(f"### Page: {page}")
                 st.json(page_res)
@@ -122,20 +116,28 @@ if st.button("Scan"):
             scan_results.append({"page": frm['page'], "form_result": res})
 
         # ---------------------------
-        # Generate UTF-8 PDF
+        # Generate PDF (UTF-8 safe with fallback)
         # ---------------------------
         pdf = PDF()
-        pdf.add_font("DejaVuSans", "", "fonts/DejaVuSans.ttf", uni=True)  # Register font BEFORE adding page
+
+        # Try to load DejaVuSans.ttf; fallback to Arial if missing
+        try:
+            pdf.add_font("DejaVuSans", "", "fonts/DejaVuSans.ttf", uni=True)
+            pdf.font_family = "DejaVuSans"
+        except FileNotFoundError:
+            st.warning("DejaVuSans.ttf not found. Using default Arial font.")
+            pdf.font_family = "Arial"
+
         pdf.add_page()
-        pdf.set_font("DejaVuSans", size=12)
+        pdf.set_font(pdf.font_family, size=12)
 
         for item in scan_results:
             pdf.multi_cell(0, 8, str(item))
             pdf.ln(3)
 
-        fname = "scan_report_utf8.pdf"
+        fname = "scan_report.pdf"
         pdf.output(fname)
 
         st.success("✅ Scanning complete!")
         with open(fname, "rb") as f:
-            st.download_button("Download UTF-8 PDF Report", f, file_name=fname)
+            st.download_button("Download PDF Report", f, file_name=fname)
