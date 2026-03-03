@@ -31,15 +31,16 @@ def evaluate_csp_header(csp_header: str):
         warnings.append("avoid 'unsafe-eval', restrict scripts")
     if "* " in csp or "*;" in csp:
         warnings.append("avoid wildcard '*' in directives")
+    if "script-src" not in csp and "default-src" not in csp:
+        warnings.append("add script-src or default-src directive")
 
     if not warnings:
         return f"✅ Strong CSP: {csp_header}"
-    # Add remediation guide
     guide = ", ".join(warnings)
     return f"⚠️ Weak CSP: {guide}. Suggested: default-src 'self'; script-src 'self' 'nonce-<random>'; img-src 'self'; style-src 'self';"
 
 # ---------------------------
-# PDF Class with UTF-8 Support
+# PDF Class with UTF-8 support
 # ---------------------------
 class PDF(FPDF):
     def header(self):
@@ -57,35 +58,30 @@ if st.button("Scan"):
 
         scan_results = []
         lock = threading.Lock()
-
-        # Containers
         page_container = st.container()
         progress_bar = st.progress(0)
         total_pages = len(pages)
         progress = {"completed": 0}
 
+        # ---------------------------
+        # Page scanning function
+        # ---------------------------
         def scan_page(page):
-            page_res = {
-                "page": page,
-                "SQLi": None,
-                "XSS": None,
-                "AI": None,
-                "CSP": None
-            }
+            page_res = {"page": page, "SQLi": None, "XSS": None, "AI": None, "CSP": None}
 
-            page_res["SQLi"] = (
-                "⚠️ Possible SQL Injection" if test_sqli(page) else "No SQL Injection"
-            )
-            page_res["XSS"] = (
-                "⚠️ Possible XSS" if test_xss(page) else "No XSS"
-            )
+            # SQLi test
+            page_res["SQLi"] = "⚠️ Possible SQL Injection" if test_sqli(page) else "No SQL Injection"
+            # XSS test
+            page_res["XSS"] = "⚠️ Possible XSS" if test_xss(page) else "No XSS"
 
+            # AI business logic analysis
             try:
                 response = requests.get(page, timeout=5)
                 page_res["AI"] = analyze_response(response.text)
             except:
-                page_res["AI"] = "Failed AI"
+                page_res["AI"] = "Failed AI analysis"
 
+            # CSP header evaluation
             try:
                 resp = requests.get(page, timeout=5)
                 csp_header = resp.headers.get("Content-Security-Policy", "")
@@ -93,15 +89,20 @@ if st.button("Scan"):
             except:
                 page_res["CSP"] = "Failed CSP check"
 
+            # Append result and update progress
             with lock:
                 scan_results.append(page_res)
                 progress["completed"] += 1
                 progress_bar.progress(progress["completed"] / total_pages)
 
+            # Display per-page result
             with page_container:
                 st.write(f"### Page: {page}")
                 st.json(page_res)
 
+        # ---------------------------
+        # Multi-threaded scanning
+        # ---------------------------
         threads = []
         for pg in pages:
             t = threading.Thread(target=scan_page, args=(pg,))
@@ -110,6 +111,9 @@ if st.button("Scan"):
         for t in threads:
             t.join()
 
+        # ---------------------------
+        # Form testing
+        # ---------------------------
         st.write("📝 Testing forms…")
         for frm in forms:
             res = test_form(frm)
@@ -121,14 +125,11 @@ if st.button("Scan"):
         # Generate UTF-8 PDF
         # ---------------------------
         pdf = PDF()
+        pdf.add_font("DejaVuSans", "", "fonts/DejaVuSans.ttf", uni=True)  # Register font BEFORE adding page
         pdf.add_page()
-
-        # Load Unicode font (e.g., DejaVu Sans)
-        pdf.add_font("DejaVuSans", "", "fonts/DejaVuSans.ttf", uni=True)
         pdf.set_font("DejaVuSans", size=12)
 
         for item in scan_results:
-            # Write each result
             pdf.multi_cell(0, 8, str(item))
             pdf.ln(3)
 
