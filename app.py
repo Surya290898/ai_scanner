@@ -1,4 +1,5 @@
 # app.py
+
 import streamlit as st
 from crawler import crawl
 from scanner import test_sqli, test_xss, test_form
@@ -7,195 +8,228 @@ import requests
 import threading
 from fpdf import FPDF
 from datetime import datetime
-import os
 
 st.set_page_config(page_title="AI Website Security Scanner", layout="wide")
-st.title("🛡 AI Website Security Scanner (Stable PDF)")
+st.title("AI Website Security Scanner")
 
 url = st.text_input("Enter your website URL (include https://)")
 
-# ---------------------------
+# ===============================
+# Remove Unicode (built-in fonts safe)
+# ===============================
+def safe_text(text):
+    return str(text).encode("latin-1", "replace").decode("latin-1")
+
+
+# ===============================
 # CSP Evaluation
-# ---------------------------
+# ===============================
 def evaluate_csp_header(csp_header: str):
     if not csp_header:
-        return "⚠️ No Content-Security-Policy header found — add a strict CSP."
+        return "No Content-Security-Policy header found"
+
     warnings = []
     csp = csp_header.lower()
-    if "unsafe-inline" in csp:
-        warnings.append("avoid 'unsafe-inline', use nonces or hashes")
-    if "unsafe-eval" in csp:
-        warnings.append("avoid 'unsafe-eval', restrict scripts")
-    if "* " in csp or "*;" in csp:
-        warnings.append("avoid wildcard '*' in directives")
-    if "script-src" not in csp and "default-src" not in csp:
-        warnings.append("add script-src or default-src directive")
-    if not warnings:
-        return f"✅ Strong CSP: {csp_header}"
-    return f"⚠️ Weak CSP: {', '.join(warnings)}. Suggested: default-src 'self'; script-src 'self' 'nonce-<random>'; img-src 'self'; style-src 'self';"
 
-# ---------------------------
-# Severity Mapping
-# ---------------------------
-def severity_label(issue_type, detected):
-    if not detected or "No" in detected:
+    if "unsafe-inline" in csp:
+        warnings.append("Uses unsafe-inline")
+    if "unsafe-eval" in csp:
+        warnings.append("Uses unsafe-eval")
+    if "*" in csp:
+        warnings.append("Uses wildcard *")
+    if "script-src" not in csp and "default-src" not in csp:
+        warnings.append("Missing script-src/default-src")
+
+    if not warnings:
+        return "Strong CSP configuration"
+
+    return "Weak CSP: " + ", ".join(warnings)
+
+
+# ===============================
+# Severity Logic
+# ===============================
+def severity_label(issue_type, result):
+    if not result or "No" in str(result):
         return "None"
+
     if issue_type in ["SQLi", "XSS"]:
         return "High"
     if issue_type == "CSP":
-        return "Medium" if "⚠️" in detected else "Low"
+        return "Medium"
     if issue_type == "AI":
         return "Medium"
     if issue_type == "Form":
         return "Low"
+
     return "Low"
 
-def severity_color(sev):
-    if sev=="High": return (255,0,0)
-    if sev=="Medium": return (255,140,0)
-    if sev=="Low": return (0,128,0)
-    return (0,0,0)
 
-# ---------------------------
-# PDF Class
-# ---------------------------
+def severity_color(sev):
+    if sev == "High":
+        return (255, 0, 0)
+    if sev == "Medium":
+        return (255, 140, 0)
+    if sev == "Low":
+        return (0, 128, 0)
+    return (0, 0, 0)
+
+
+# ===============================
+# PDF Class (Built-in Fonts Only)
+# ===============================
 class PDF(FPDF):
-    def __init__(self, font_family="Arial"):
-        super().__init__()
-        self.font_family = font_family
+
     def header(self):
-        # safe because font is pre-registered before first add_page()
-        self.set_font(self.font_family, 'B', 16)
+        self.set_font("Arial", "B", 16)
         self.cell(0, 10, "AI Website Security Scan Report", ln=True, align="C")
         self.ln(5)
 
-# ---------------------------
+
+# ===============================
 # Scan Button
-# ---------------------------
+# ===============================
 if st.button("Scan"):
+
     if not url.startswith("http"):
-        st.error("Please enter a valid URL including http:// or https://")
-    else:
-        st.info("🔍 Crawling website...")
-        pages, forms = crawl(url)
-        st.success(f"Found {len(pages)} pages and {len(forms)} forms!")
+        st.error("Please enter valid URL including https://")
+        st.stop()
 
-        scan_results = []
-        lock = threading.Lock()
-        page_container = st.container()
-        progress_bar = st.progress(0)
-        total_pages = len(pages)
-        progress = {"completed":0}
+    st.info("Crawling website...")
+    pages, forms = crawl(url)
+    st.success(f"Found {len(pages)} pages and {len(forms)} forms")
 
-        # ---------------------------
-        # Page scanning
-        # ---------------------------
-        def scan_page(page):
-            page_res = {"page": page, "SQLi": None, "XSS": None, "AI": None, "CSP": None}
-            page_res["SQLi"] = "⚠️ Possible SQL Injection" if test_sqli(page) else "No SQL Injection"
-            page_res["XSS"] = "⚠️ Possible XSS" if test_xss(page) else "No XSS"
-            try:
-                response = requests.get(page, timeout=5)
-                page_res["AI"] = analyze_response(response.text)
-            except:
-                page_res["AI"] = "Failed AI analysis"
-            try:
-                resp = requests.get(page, timeout=5)
-                csp_header = resp.headers.get("Content-Security-Policy", "")
-                page_res["CSP"] = evaluate_csp_header(csp_header)
-            except:
-                page_res["CSP"] = "Failed CSP check"
+    scan_results = []
+    lock = threading.Lock()
+    progress = st.progress(0)
 
-            with lock:
-                scan_results.append(page_res)
-                progress["completed"] +=1
-                progress_bar.progress(progress["completed"]/total_pages)
+    # ===============================
+    # Page Scanner
+    # ===============================
+    def scan_page(page):
 
-            with page_container:
-                st.write(f"### Page: {page}")
-                st.json(page_res)
+        result = {"page": page}
 
-        threads = []
-        for pg in pages:
-            t = threading.Thread(target=scan_page, args=(pg,))
-            t.start()
-            threads.append(t)
-        for t in threads: t.join()
+        result["SQLi"] = "Possible SQL Injection" if test_sqli(page) else "No SQL Injection"
+        result["XSS"] = "Possible XSS" if test_xss(page) else "No XSS"
 
-        # ---------------------------
-        # Form Testing
-        # ---------------------------
-        st.write("📝 Testing forms…")
-        for frm in forms:
-            res = test_form(frm)
-            st.write(f"Form on {frm['page']}:")
-            st.json(res)
-            scan_results.append({"page": frm['page'], "Form": res})
+        try:
+            response = requests.get(page, timeout=5)
+            result["AI"] = analyze_response(response.text)
+        except:
+            result["AI"] = "AI analysis failed"
 
-        # ---------------------------
-        # PDF Generation
-        # ---------------------------
-        FONT_PATH = "fonts/DejaVuSans.ttf"
-        if os.path.exists(FONT_PATH):
-            pdf = PDF(font_family="DejaVuSans")
-            pdf.add_font("DejaVuSans", "", FONT_PATH, uni=True)
-            st.success("Using DejaVuSans (Unicode-safe).")
-        else:
-            pdf = PDF(font_family="Arial")
-            st.warning("DejaVuSans.ttf not found. Using Arial (may break Unicode).")
+        try:
+            resp = requests.get(page, timeout=5)
+            csp = resp.headers.get("Content-Security-Policy", "")
+            result["CSP"] = evaluate_csp_header(csp)
+        except:
+            result["CSP"] = "CSP check failed"
 
-        # --- Cover Page ---
+        with lock:
+            scan_results.append(result)
+            progress.progress(len(scan_results) / len(pages))
+
+        st.write(f"Scanned: {page}")
+        st.json(result)
+
+    threads = []
+    for p in pages:
+        t = threading.Thread(target=scan_page, args=(p,))
+        t.start()
+        threads.append(t)
+
+    for t in threads:
+        t.join()
+
+    # ===============================
+    # Form Testing
+    # ===============================
+    for f in forms:
+        res = test_form(f)
+        scan_results.append({
+            "page": f["page"],
+            "Form": res
+        })
+
+    # ===============================
+    # PDF GENERATION (NO CUSTOM FONTS)
+    # ===============================
+    pdf = PDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+
+    # ----------------
+    # Cover Page
+    # ----------------
+    pdf.add_page()
+    pdf.set_font("Arial", "B", 20)
+    pdf.cell(0, 15, "AI Website Security Scanner Report", ln=True, align="C")
+    pdf.ln(10)
+
+    pdf.set_font("Arial", "", 12)
+    pdf.cell(0, 8, f"Target URL: {safe_text(url)}", ln=True)
+    pdf.cell(0, 8, f"Scan Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", ln=True)
+
+    # ----------------
+    # Executive Summary
+    # ----------------
+    pdf.add_page()
+    pdf.set_font("Arial", "B", 16)
+    pdf.cell(0, 10, "Executive Summary", ln=True)
+    pdf.ln(5)
+
+    high = 0
+    medium = 0
+    low = 0
+
+    for item in scan_results:
+        for k, v in item.items():
+            if k == "page":
+                continue
+            sev = severity_label(k, v)
+            if sev == "High":
+                high += 1
+            elif sev == "Medium":
+                medium += 1
+            elif sev == "Low":
+                low += 1
+
+    pdf.set_font("Arial", "", 12)
+    pdf.cell(0, 8, f"Total Pages Scanned: {len(scan_results)}", ln=True)
+    pdf.cell(0, 8, f"High Severity Issues: {high}", ln=True)
+    pdf.cell(0, 8, f"Medium Severity Issues: {medium}", ln=True)
+    pdf.cell(0, 8, f"Low Severity Issues: {low}", ln=True)
+
+    # ----------------
+    # Detailed Findings
+    # ----------------
+    for item in scan_results:
+
         pdf.add_page()
-        pdf.set_font(pdf.font_family,'B',20)
-        pdf.cell(0,15,"AI Website Security Scanner Report",ln=True,align="C")
-        pdf.ln(10)
-        pdf.set_font(pdf.font_family,'',12)
-        pdf.cell(0,8,f"URL Scanned: {url}",ln=True)
-        pdf.cell(0,8,f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",ln=True)
-        pdf.ln(10)
-
-        # --- Summary Page ---
-        pdf.add_page()
-        pdf.set_font(pdf.font_family,'B',16)
-        pdf.cell(0,10,"Summary",ln=True)
-        pdf.ln(5)
-        total_pages_count=len(scan_results)
-        high=sum(1 for r in scan_results if "High" in r.values())
-        medium=sum(1 for r in scan_results if "Medium" in r.values())
-        low=sum(1 for r in scan_results if "Low" in r.values())
-        pdf.set_font(pdf.font_family,'',12)
-        pdf.cell(0,8,f"Total Pages Scanned: {total_pages_count}",ln=True)
-        pdf.cell(0,8,f"High Severity Issues: {high}",ln=True)
-        pdf.cell(0,8,f"Medium Severity Issues: {medium}",ln=True)
-        pdf.cell(0,8,f"Low Severity Issues: {low}",ln=True)
+        pdf.set_font("Arial", "B", 14)
+        pdf.cell(0, 10, f"Page: {safe_text(item.get('page'))}", ln=True)
         pdf.ln(5)
 
-        # --- Detailed Findings ---
-        for item in scan_results:
-            pdf.add_page()
-            pdf.set_font(pdf.font_family,'B',14)
-            pdf.cell(0,10,f"Page: {item.get('page','')}",ln=True)
-            pdf.ln(2)
-            pdf.set_font(pdf.font_family,'B',12)
-            pdf.cell(50,8,"Vulnerability",border=1)
-            pdf.cell(30,8,"Severity",border=1)
-            pdf.cell(0,8,"Details",border=1,ln=True)
-            pdf.set_font(pdf.font_family,'',12)
-            for k,v in item.items():
-                if k=="page": continue
-                sev = severity_label(k,v)
-                r,g,b = severity_color(sev)
-                pdf.set_text_color(r,g,b)
-                pdf.cell(50,8,k,border=1)
-                pdf.cell(30,8,sev,border=1)
-                # Convert to str and replace unsupported unicode chars
-                text_safe = str(v).encode("latin-1", "replace").decode("latin-1")
-                pdf.multi_cell(0,8,text_safe,border=1)
-            pdf.set_text_color(0,0,0)
+        for k, v in item.items():
+            if k == "page":
+                continue
 
-        # --- Output PDF ---
-        fname="scan_report_final.pdf"
-        pdf.output(fname)
-        st.success("✅ Scanning complete!")
-        with open(fname,"rb") as f:
-            st.download_button("Download PDF Report",f,file_name=fname)
+            sev = severity_label(k, v)
+            r, g, b = severity_color(sev)
+
+            pdf.set_text_color(r, g, b)
+            pdf.set_font("Arial", "B", 12)
+            pdf.cell(0, 8, f"{k} - Severity: {sev}", ln=True)
+
+            pdf.set_text_color(0, 0, 0)
+            pdf.set_font("Arial", "", 11)
+            pdf.multi_cell(0, 8, safe_text(v))
+            pdf.ln(3)
+
+    filename = "scan_report.pdf"
+    pdf.output(filename)
+
+    st.success("Scan Complete")
+
+    with open(filename, "rb") as f:
+        st.download_button("Download PDF Report", f, file_name=filename)
