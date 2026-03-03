@@ -9,7 +9,7 @@ from fpdf import FPDF
 from datetime import datetime
 
 st.set_page_config(page_title="AI Website Security Scanner", layout="wide")
-st.title("🛡 AI Website Security Scanner - OWASP Style PDF")
+st.title("🛡 AI Website Security Scanner - Wrapped PDF")
 
 url = st.text_input("Enter your website URL (include https://)")
 
@@ -62,20 +62,61 @@ def severity_color(sev):
     return (0,0,0)
 
 # ---------------------------
-# PDF Class - OWASP Style
+# PDF Class - Wrapped Cells
 # ---------------------------
 class PDF(FPDF):
     def header(self):
         self.set_font("Arial", "B", 16)
-        self.set_fill_color(220, 220, 220)
+        self.set_fill_color(200, 200, 200)
         self.cell(0, 10, "AI Website Security Scan Report", ln=True, align="C", fill=True)
         self.ln(5)
 
-    def table_row(self, cols, widths, fill=False, text_color=(0,0,0)):
-        self.set_text_color(*text_color)
-        for i, col in enumerate(cols):
-            self.cell(widths[i], 8, safe_text(col), border=1, ln=0, align='L', fill=fill)
-        self.ln()
+    def table_row(self, col_widths, data, fill=False, colors=None):
+        max_height = 0
+        nb_lines = []
+        # Calculate number of lines for each cell
+        for i, txt in enumerate(data):
+            lines = self.multi_cell_lines(col_widths[i], txt)
+            nb_lines.append(lines)
+            if lines * 6 > max_height:
+                max_height = lines * 6  # line height = 6
+        # Save current position
+        x_start = self.get_x()
+        y_start = self.get_y()
+        # Draw cells
+        for i, txt in enumerate(data):
+            self.set_xy(x_start + sum(col_widths[:i]), y_start)
+            if colors and colors[i]:
+                self.set_text_color(*colors[i])
+            else:
+                self.set_text_color(0,0,0)
+            self.multi_cell(col_widths[i], 6, safe_text(txt), border=1, ln=3, fill=fill)
+        # Move to next line
+        self.set_y(y_start + max_height)
+
+    def multi_cell_lines(self, w, txt):
+        # Estimate number of lines a multi_cell will take
+        if not txt:
+            return 1
+        return len(self.multi_cell_split(txt, w))
+
+    def multi_cell_split(self, txt, w):
+        # Split text into lines for multi_cell
+        cw = self.get_string_width
+        words = txt.split()
+        lines = []
+        current = ""
+        for word in words:
+            test_line = current + (" " if current else "") + word
+            if cw(test_line) <= w:
+                current = test_line
+            else:
+                if current:
+                    lines.append(current)
+                current = word
+        if current:
+            lines.append(current)
+        return lines
 
 # ---------------------------
 # Scan Button
@@ -138,7 +179,7 @@ if st.button("Scan"):
         scan_results.append({"page": frm['page'], "Form": res})
 
     # ---------------------------
-    # PDF Generation - OWASP Style
+    # PDF Generation - Wrapped Table
     # ---------------------------
     pdf = PDF()
     pdf.set_auto_page_break(auto=True, margin=15)
@@ -153,7 +194,7 @@ if st.button("Scan"):
     pdf.cell(0,8,f"Scan Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",ln=True)
     pdf.ln(10)
 
-    # --- Executive Summary Table ---
+    # --- Executive Summary ---
     pdf.add_page()
     pdf.set_font("Arial","B",16)
     pdf.cell(0,10,"Executive Summary",ln=True)
@@ -164,27 +205,30 @@ if st.button("Scan"):
     low = sum(1 for r in scan_results if any(severity_label(k,v)=="Low" for k,v in r.items()))
 
     pdf.set_font("Arial","B",12)
-    pdf.table_row(["Metric","Count"], [70,30], fill=True)
-    pdf.table_row(["Total Pages Scanned", str(len(scan_results))], [70,30])
-    pdf.table_row(["High Severity Issues", str(high)], [70,30], text_color=severity_color("High"))
-    pdf.table_row(["Medium Severity Issues", str(medium)], [70,30], text_color=severity_color("Medium"))
-    pdf.table_row(["Low Severity Issues", str(low)], [70,30], text_color=severity_color("Low"))
+    col_widths = [80,30]
+    pdf.table_row(col_widths, ["Metric","Count"], fill=True)
+    pdf.set_font("Arial","",12)
+    pdf.table_row(col_widths, ["Total Pages Scanned", str(len(scan_results))])
+    pdf.table_row(col_widths, ["High Severity Issues", str(high)], colors=[severity_color("High"), None])
+    pdf.table_row(col_widths, ["Medium Severity Issues", str(medium)], colors=[severity_color("Medium"), None])
+    pdf.table_row(col_widths, ["Low Severity Issues", str(low)], colors=[severity_color("Low"), None])
 
-    # --- Detailed Findings with alternating row colors ---
+    # --- Detailed Findings ---
     pdf.add_page()
     pdf.set_font("Arial","B",14)
     pdf.cell(0,10,"Detailed Findings",ln=True)
     pdf.ln(5)
 
+    col_widths = [50,30,110]
     for item in scan_results:
         pdf.set_font("Arial","B",12)
         pdf.cell(0,8,f"Page: {safe_text(item.get('page'))}", ln=True)
         pdf.ln(2)
 
-        # Table header
+        # Header row
         pdf.set_font("Arial","B",11)
         pdf.set_fill_color(200,200,200)
-        pdf.table_row(["Vulnerability","Severity","Details"], [50,30,110], fill=True)
+        pdf.table_row(col_widths, ["Vulnerability","Severity","Details"], fill=True)
 
         pdf.set_font("Arial","",11)
         fill = False
@@ -192,12 +236,12 @@ if st.button("Scan"):
             if k=="page": continue
             sev = severity_label(k,v)
             pdf.set_fill_color(245,245,245) if fill else pdf.set_fill_color(255,255,255)
-            pdf.table_row([k, sev, str(v)], [50,30,110], fill=fill, text_color=severity_color(sev))
+            pdf.table_row(col_widths, [k, sev, str(v)], fill=fill, colors=[None, severity_color(sev), None])
             fill = not fill
         pdf.ln(3)
 
-    filename="scan_report_owasp_style.pdf"
+    filename="scan_report_wrapped.pdf"
     pdf.output(filename)
-    st.success("✅ OWASP-Style Professional Scan Complete")
+    st.success("✅ Scan Complete - PDF with wrapped text")
     with open(filename,"rb") as f:
-        st.download_button("Download OWASP-Style PDF Report",f,file_name=filename)
+        st.download_button("Download PDF Report",f,file_name=filename)
