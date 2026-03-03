@@ -7,6 +7,7 @@ import requests
 import threading
 from fpdf import FPDF
 from datetime import datetime
+import os
 
 st.set_page_config(page_title="AI Website Security Scanner", layout="wide")
 st.title("🛡 AI Website Security Scanner (Professional Report)")
@@ -135,13 +136,14 @@ if st.button("Scan"):
         # ---------------------------
         pdf = PDF()
 
-        # Font registration BEFORE adding any page
-        try:
-            pdf.add_font("DejaVuSans","", "fonts/DejaVuSans.ttf", uni=True)
-            pdf.font_family="DejaVuSans"
-        except FileNotFoundError:
-            st.warning("DejaVuSans.ttf not found. Using default Arial font.")
-            pdf.font_family="Arial"
+        # --- Font registration BEFORE any page ---
+        FONT_PATH = "fonts/DejaVuSans.ttf"
+        if os.path.exists(FONT_PATH):
+            pdf.add_font("DejaVuSans", "", FONT_PATH, uni=True)
+            pdf.font_family = "DejaVuSans"
+        else:
+            pdf.font_family = "Arial"
+            st.warning("DejaVuSans.ttf not found. PDF will use default Arial font.")
 
         # Cover Page
         pdf.add_page()
