@@ -67,7 +67,6 @@ with st.sidebar:
     do_ai = st.checkbox("AI-style page review (local heuristics)", value=True)
     st.caption("All operations use simple HTTP requests with timeouts. No external AI services.")
 
-
 url = st.text_input("Enter your website URL (include https://)")
 
 if st.button("Scan"):
@@ -128,7 +127,8 @@ if st.button("Scan"):
             progress.progress(int(100 * done / max(1, len(pages))))
 
     st.success("Page scanning done.")
-    st.write("Sample page result:", results[0] if results else {})
+    if results:
+        st.write("Sample page result:", results[0])
 
     # ------------------------------------
     # Forms testing
@@ -178,7 +178,6 @@ if st.button("Scan"):
 
     # Executive Summary
     high = medium = 0
-    # Count obvious high/medium from sqli/xss + AI findings
     for item in results:
         if item.get("sqli") == "Possible SQL Injection" or item.get("xss") == "Possible XSS":
             high += 1
@@ -290,4 +289,3 @@ if st.button("Scan"):
             st.download_button("Download PDF Report", f, file_name=filename)
     except Exception as e:
         st.error(f"Failed to generate PDF: {e}")
-``
