@@ -1,6 +1,6 @@
 # scanner.py
 import json
-from typing import Dict, List, Tuple
+from typing import Dict, List
 import requests
 
 DEFAULT_TIMEOUT = 8
@@ -28,7 +28,6 @@ def test_xss(url: str) -> bool:
         body = r.text or ""
         if raw in body or enc in body:
             return True
-        # Try encoded
         r2 = requests.get(url, params={"test": enc}, headers=UA, timeout=DEFAULT_TIMEOUT)
         body2 = r2.text or ""
         return (raw in body2) or (enc in body2)
@@ -110,13 +109,11 @@ def graphql_probe(endpoint: str) -> Dict:
     """
     result = {"endpoint": endpoint, "introspection": "Unknown"}
     try:
-        # harmless query
         r = requests.post(endpoint, json={"query": "query{__typename}"}, headers=UA, timeout=DEFAULT_TIMEOUT)
         if r.status_code not in (200, 400):
             result["introspection"] = "Not reachable"
             return result
 
-        # try introspection
         iq = {"query": "{__schema{queryType{name}}}"}
         ri = requests.post(endpoint, json=iq, headers=UA, timeout=DEFAULT_TIMEOUT)
         txt = (ri.text or "").lower()
@@ -164,3 +161,4 @@ def openapi_fetch_and_lint(url: str) -> Dict:
     except Exception:
         pass
     return res
+``
