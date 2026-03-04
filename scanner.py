@@ -1,6 +1,6 @@
 # scanner.py
 import json
-from typing import Dict, List
+from typing import Dict
 import requests
 
 DEFAULT_TIMEOUT = 8
@@ -15,7 +15,10 @@ def test_sqli(url: str) -> bool:
     try:
         r = requests.get(url, params={"test": payload}, headers=UA, timeout=DEFAULT_TIMEOUT)
         body = (r.text or "").lower()
-        return any(err in body for err in ["sql syntax", "mysql", "syntax error", "unclosed quotation mark", "odbc", "pdoexception"])
+        return any(err in body for err in [
+            "sql syntax", "mysql", "syntax error",
+            "unclosed quotation mark", "odbc", "pdoexception"
+        ])
     except Exception:
         return False
 
@@ -81,7 +84,11 @@ def csp_evaluator(csp_header: str) -> str:
     return "Strong CSP configuration" if not warnings else "Weak CSP: " + ", ".join(warnings)
 
 def headers_analyzer(url: str) -> Dict:
-    out = {}
+    """
+    Fetch the URL and return a summarized view of security-relevant headers
+    so the report can show CSP/HSTS/CORS/etc. for that page.
+    """
+    out: Dict = {}
     try:
         r = requests.get(url, headers=UA, timeout=DEFAULT_TIMEOUT)
         h = {k.lower(): v for k, v in r.headers.items()}
@@ -146,7 +153,7 @@ def openapi_fetch_and_lint(url: str) -> Dict:
         if servers:
             for s in servers:
                 u = s.get("url", "")
-                if u.startswith("http://"):
+                if isinstance(u, str) and u.startswith("http://"):
                     res["issues"].append("Server URL uses http://; prefer https://")
         else:
             res["issues"].append("No 'servers' section declared")
@@ -161,4 +168,3 @@ def openapi_fetch_and_lint(url: str) -> Dict:
     except Exception:
         pass
     return res
-``
