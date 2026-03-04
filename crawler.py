@@ -1,7 +1,6 @@
 # crawler.py
 import json
 import re
-import socket
 from collections import deque
 from typing import Dict, List, Set, Tuple
 from urllib.parse import urljoin, urlparse
@@ -15,8 +14,8 @@ UA = {"User-Agent": "AI-Security-Scanner/1.0 (+local)"}
 def same_origin(a: str, b: str) -> bool:
     try:
         pa, pb = urlparse(a), urlparse(b)
-        return (pa.scheme, pa.hostname, pa.port or (443 if pa.scheme == "https" else 80)) == \
-               (pb.scheme, pb.hostname, pb.port or (443 if pb.scheme == "https" else 80))
+        def _port(p): return p.port or (443 if p.scheme == "https" else 80)
+        return (pa.scheme, pa.hostname, _port(pa)) == (pb.scheme, pb.hostname, _port(pb))
     except Exception:
         return False
 
@@ -47,7 +46,6 @@ def parse_forms(soup: BeautifulSoup, page_url: str) -> List[Dict]:
 
 def robots_and_sitemap_seeds(root: str) -> Tuple[List[str], List[str]]:
     seeds, site_urls = [], []
-    # robots.txt
     r = _get(urljoin(root, "/robots.txt"))
     if r and r.ok:
         for line in r.text.splitlines():
@@ -60,7 +58,6 @@ def robots_and_sitemap_seeds(root: str) -> Tuple[List[str], List[str]]:
                     seeds.append(urljoin(root, path))
             if line.lower().startswith("sitemap:"):
                 site_urls.append(line.split(":", 1)[1].strip())
-    # sitemap.xml (explicit + default)
     if not site_urls:
         site_urls = [urljoin(root, "/sitemap.xml")]
     for sm in site_urls:
@@ -77,7 +74,6 @@ def robots_and_sitemap_seeds(root: str) -> Tuple[List[str], List[str]]:
     return list(set(seeds)), site_urls
 
 def historical_urls_via_wayback(root: str, limit: int = 50) -> List[str]:
-    # Lightweight Wayback CDX usage; safe to fail silently
     try:
         host = urlparse(root).netloc
         api = f"http://web.archive.org/cdx/search/cdx?url={host}/*&output=json&limit={limit}"
@@ -85,18 +81,16 @@ def historical_urls_via_wayback(root: str, limit: int = 50) -> List[str]:
         results = []
         if resp and resp.ok:
             data = json.loads(resp.text)
-            # First row is header. 3rd column is 'original'
-            for row in data[1:]:
+            for row in data[1:]:  # first row is header
                 orig = row[2]
-                if orig.startswith("http://") or orig.startswith("https://"):
-                    # keep same scheme as root for safety
-                    results.append(orig.replace("http://", urlparse(root).scheme + "://", 1))
+                if orig.startswith(("http://", "https://")):
+                    scheme = urlparse(root).scheme or "https"
+                    results.append(orig.replace("http://", scheme + "://", 1))
         return list(set(results))
     except Exception:
         return []
 
 def subdomains_via_crtsh(root: str, limit: int = 50) -> List[str]:
-    # Use crt.sh JSON output to enumerate SANs; resolve only same apex
     try:
         parsed = urlparse(root)
         apex = parsed.hostname
@@ -106,11 +100,9 @@ def subdomains_via_crtsh(root: str, limit: int = 50) -> List[str]:
         resp = _get(q)
         subs = set()
         if resp and resp.ok:
-            # crt.sh can return multiple JSON objects; guard accordingly
             try:
                 data = json.loads(resp.text)
             except Exception:
-                # Attempt to fix minor JSON issues (rare)
                 text = "[" + resp.text.replace("}{", "},{") + "]"
                 data = json.loads(text)
             for item in data[:limit]:
@@ -141,7 +133,6 @@ def guess_graphql_endpoints(root: str) -> List[str]:
     found = []
     for p in candidates:
         url = urljoin(root, p)
-        # probe with a universal query that should be harmless
         try:
             jr = requests.post(url, json={"query": "query{__typename}"}, headers=UA, timeout=DEFAULT_TIMEOUT)
             if jr.status_code in (200, 400) and ("__typename" in (jr.text or "")):
@@ -151,16 +142,12 @@ def guess_graphql_endpoints(root: str) -> List[str]:
     return list(set(found))
 
 def extract_js_libs_and_links(soup: BeautifulSoup) -> Dict:
-    """
-    Extract JS library/version hints and linked resources to help other scanners.
-    """
     libs = []
     links = []
     try:
         for s in soup.find_all("script", src=True):
             src = s.get("src") or ""
             links.append(src)
-            # naive lib/version extraction: jquery-3.6.0.min.js -> ("jquery", "3.6.0")
             m = re.search(r"/?([a-z0-9\.\-_]+?)-(\d+\.\d+(?:\.\d+)?)(?:\.min)?\.js", src, flags=re.I)
             if m:
                 libs.append({"name": m.group(1).lower(), "version": m.group(2), "src": src})
