@@ -9,14 +9,26 @@ from fpdf import FPDF
 
 from ai_engine import analyze_response
 from crawler import crawl
-from scanner import (
-    headers_analyzer,
-    test_sqli,
-    test_xss,
-    test_form,
-    graphql_probe,
-    openapi_fetch_and_lint
-)
+
+# Robust import (handles stale module caches during hot reload)
+try:
+    from scanner import (
+        headers_analyzer,
+        test_sqli,
+        test_xss,
+        test_form,
+        graphql_probe,
+        openapi_fetch_and_lint
+    )
+except Exception:
+    import importlib, scanner as _scanner
+    importlib.reload(_scanner)
+    headers_analyzer = getattr(_scanner, "headers_analyzer")
+    test_sqli = getattr(_scanner, "test_sqli")
+    test_xss = getattr(_scanner, "test_xss")
+    test_form = getattr(_scanner, "test_form")
+    graphql_probe = getattr(_scanner, "graphql_probe")
+    openapi_fetch_and_lint = getattr(_scanner, "openapi_fetch_and_lint")
 
 st.set_page_config(page_title="AI Website Security Scanner", layout="wide")
 st.title("AI Website Security Scanner")
@@ -37,6 +49,28 @@ def safe_text(text, max_len=500):
     if len(text) > max_len:
         text = text[:max_len] + " ..."
     return text
+
+def _wrap_long_tokens(s: str, max_token_len: int = 80) -> str:
+    """
+    Insert newlines into very long unbroken tokens so fpdf2 can wrap them.
+    Only ASCII-safe characters are used (no zero-width spaces).
+    """
+    if not s:
+        return ""
+    out_parts = []
+    for tok in s.split():
+        if len(tok) > max_token_len:
+            chunks = [tok[i:i+max_token_len] for i in range(0, len(tok), max_token_len)]
+            out_parts.append("\n".join(chunks))
+        else:
+            out_parts.append(tok)
+    return " ".join(out_parts)
+
+def pdf_block_text(s: str, max_len: int = 4000) -> str:
+    """
+    Make text PDF-safe (latin-1) and also wrap long tokens to avoid FPDFException.
+    """
+    return _wrap_long_tokens(safe_text(s, max_len=max_len))
 
 def sev_color(sev: str):
     if sev == "High":
@@ -229,7 +263,7 @@ if st.button("Scan"):
             pdf.set_font("Helvetica", "B", 12)
             pdf.cell(0, 8, "Header Analysis:", ln=True)
             pdf.set_font("Helvetica", "", 11)
-            pdf.multi_cell(0, 6, safe_text(json.dumps(h, indent=2)))
+            pdf.multi_cell(0, 6, pdf_block_text(json.dumps(h, indent=2)))
 
         # AI-style findings
         af = item.get("ai_findings")
@@ -243,13 +277,13 @@ if st.button("Scan"):
                 pdf.cell(0, 6, f"- {safe_text(f.get('type'))} (Severity: {sev})", ln=True)
                 pdf.set_text_color(0, 0, 0)
                 pdf.set_font("Helvetica", "", 11)
-                pdf.multi_cell(0, 5, safe_text(f"Description: {f.get('description', '')}"))
-                pdf.multi_cell(0, 5, safe_text(f"Impact: {f.get('impact', '')}"))
-                pdf.multi_cell(0, 5, safe_text(f"Remediation: {f.get('remediation', '')}"))
+                pdf.multi_cell(0, 5, pdf_block_text(f"Description: {f.get('description', '')}"))
+                pdf.multi_cell(0, 5, pdf_block_text(f"Impact: {f.get('impact', '')}"))
+                pdf.multi_cell(0, 5, pdf_block_text(f"Remediation: {f.get('remediation', '')}"))
                 pdf.ln(1)
         elif isinstance(af, dict):
             pdf.set_font("Helvetica", "", 11)
-            pdf.multi_cell(0, 6, safe_text(json.dumps(af, indent=2)))
+            pdf.multi_cell(0, 6, pdf_block_text(json.dumps(af, indent=2)))
 
     # Forms section
     if form_results:
@@ -258,7 +292,7 @@ if st.button("Scan"):
         pdf.cell(0, 10, "Forms Testing", ln=True)
         pdf.set_font("Helvetica", "", 11)
         for fr in form_results[:100]:
-            pdf.multi_cell(0, 6, safe_text(json.dumps(fr, indent=2)))
+            pdf.multi_cell(0, 6, pdf_block_text(json.dumps(fr, indent=2)))
             pdf.ln(1)
 
     # OpenAPI section
@@ -268,7 +302,7 @@ if st.button("Scan"):
         pdf.cell(0, 10, "OpenAPI Checks (Basic)", ln=True)
         pdf.set_font("Helvetica", "", 11)
         for oa in openapi_results:
-            pdf.multi_cell(0, 6, safe_text(json.dumps(oa, indent=2)))
+            pdf.multi_cell(0, 6, pdf_block_text(json.dumps(oa, indent=2)))
             pdf.ln(1)
 
     # GraphQL section
@@ -278,7 +312,7 @@ if st.button("Scan"):
         pdf.cell(0, 10, "GraphQL Probes", ln=True)
         pdf.set_font("Helvetica", "", 11)
         for g in gql_results:
-            pdf.multi_cell(0, 6, safe_text(json.dumps(g, indent=2)))
+            pdf.multi_cell(0, 6, pdf_block_text(json.dumps(g, indent=2)))
             pdf.ln(1)
 
     filename = "scan_report.pdf"
@@ -289,3 +323,4 @@ if st.button("Scan"):
             st.download_button("Download PDF Report", f, file_name=filename)
     except Exception as e:
         st.error(f"Failed to generate PDF: {e}")
+``
