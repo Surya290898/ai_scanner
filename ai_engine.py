@@ -73,7 +73,7 @@ def analyze_response(response_text: str,
             _add(findings, "Missing Security Header", "Low",
                  "No clickjacking protection header detected (CSP frame-ancestors or X-Frame-Options).",
                  "Pages could be embedded in iframes to trick users into unwanted clicks.",
-                 "Set 'Content-Security-Policy: frame-ancestors \'none\';' (recommended) or 'X-Frame-Options: DENY'.")
+                 "Set 'Content-Security-Policy: frame-ancestors 'none';' (recommended) or 'X-Frame-Options: DENY'.")
 
     # CSP quality hints
     if csp:
@@ -137,7 +137,7 @@ def analyze_response(response_text: str,
     # ----------------------------
     # Mixed content hint (if https and body links to http)
     # ----------------------------
-    if url.startswith("https://") and ('src="http://' in text or "href=\"http://" in text):
+    if url.startswith("https://") and ('src="http://' in text or 'href="http://' in text):
         _add(findings, "Mixed Content", "Medium",
              "HTTPS page links or loads HTTP resources.",
              "Breaks transport security and can lead to code/data injection.",
