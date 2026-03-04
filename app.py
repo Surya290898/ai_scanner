@@ -323,4 +323,3 @@ if st.button("Scan"):
             st.download_button("Download PDF Report", f, file_name=filename)
     except Exception as e:
         st.error(f"Failed to generate PDF: {e}")
-``
