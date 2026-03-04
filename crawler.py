@@ -1,47 +1,240 @@
 # crawler.py
+import json
+import re
+import socket
+from collections import deque
+from typing import Dict, List, Set, Tuple
+from urllib.parse import urljoin, urlparse
+
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin
 
-def crawl(url):
+DEFAULT_TIMEOUT = 8
+UA = {"User-Agent": "AI-Security-Scanner/1.0 (+local)"}
+
+def same_origin(a: str, b: str) -> bool:
+    try:
+        pa, pb = urlparse(a), urlparse(b)
+        return (pa.scheme, pa.hostname, pa.port or (443 if pa.scheme == "https" else 80)) == \
+               (pb.scheme, pb.hostname, pb.port or (443 if pb.scheme == "https" else 80))
+    except Exception:
+        return False
+
+def _get(url: str, allow_redirects: bool = True):
+    try:
+        return requests.get(url, headers=UA, timeout=DEFAULT_TIMEOUT, allow_redirects=allow_redirects)
+    except Exception:
+        return None
+
+def _safe_add(url: str, base: str, queue: deque, seen: Set[str]):
+    if not url:
+        return
+    full = urljoin(base, url)
+    if full not in seen and full.startswith(base):
+        queue.append(full)
+
+def parse_forms(soup: BeautifulSoup, page_url: str) -> List[Dict]:
+    forms = []
+    try:
+        for form in soup.find_all("form"):
+            method = (form.get("method") or "get").lower()
+            action = form.get("action") or page_url
+            inputs = [inp.get("name") for inp in form.find_all("input") if inp.get("name")]
+            forms.append({"page": page_url, "method": method, "action": urljoin(page_url, action), "inputs": inputs})
+    except Exception:
+        pass
+    return forms
+
+def robots_and_sitemap_seeds(root: str) -> Tuple[List[str], List[str]]:
+    seeds, site_urls = [], []
+    # robots.txt
+    r = _get(urljoin(root, "/robots.txt"))
+    if r and r.ok:
+        for line in r.text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.lower().startswith("disallow:"):
+                path = line.split(":", 1)[1].strip()
+                if path:
+                    seeds.append(urljoin(root, path))
+            if line.lower().startswith("sitemap:"):
+                site_urls.append(line.split(":", 1)[1].strip())
+    # sitemap.xml (explicit + default)
+    if not site_urls:
+        site_urls = [urljoin(root, "/sitemap.xml")]
+    for sm in site_urls:
+        resp = _get(sm)
+        if resp and resp.ok:
+            try:
+                soup = BeautifulSoup(resp.text, "xml")
+                for loc in soup.find_all("loc"):
+                    loc_url = (loc.text or "").strip()
+                    if loc_url:
+                        seeds.append(loc_url)
+            except Exception:
+                pass
+    return list(set(seeds)), site_urls
+
+def historical_urls_via_wayback(root: str, limit: int = 50) -> List[str]:
+    # Lightweight Wayback CDX usage; safe to fail silently
+    try:
+        host = urlparse(root).netloc
+        api = f"http://web.archive.org/cdx/search/cdx?url={host}/*&output=json&limit={limit}"
+        resp = _get(api)
+        results = []
+        if resp and resp.ok:
+            data = json.loads(resp.text)
+            # First row is header. 3rd column is 'original'
+            for row in data[1:]:
+                orig = row[2]
+                if orig.startswith("http://") or orig.startswith("https://"):
+                    # keep same scheme as root for safety
+                    results.append(orig.replace("http://", urlparse(root).scheme + "://", 1))
+        return list(set(results))
+    except Exception:
+        return []
+
+def subdomains_via_crtsh(root: str, limit: int = 50) -> List[str]:
+    # Use crt.sh JSON output to enumerate SANs; resolve only same apex
+    try:
+        parsed = urlparse(root)
+        apex = parsed.hostname
+        if not apex:
+            return []
+        q = f"https://crt.sh/?q=%25.{apex}&output=json"
+        resp = _get(q)
+        subs = set()
+        if resp and resp.ok:
+            # crt.sh can return multiple JSON objects; guard accordingly
+            try:
+                data = json.loads(resp.text)
+            except Exception:
+                # Attempt to fix minor JSON issues (rare)
+                text = "[" + resp.text.replace("}{", "},{") + "]"
+                data = json.loads(text)
+            for item in data[:limit]:
+                name = item.get("name_value", "")
+                for host in name.split("\n"):
+                    host = host.strip()
+                    if host and host.endswith(apex):
+                        scheme = parsed.scheme or "https"
+                        subs.add(f"{scheme}://{host}")
+        return list(subs)
+    except Exception:
+        return []
+
+def guess_openapi_paths(root: str) -> List[str]:
+    candidates = [
+        "/openapi.json", "/swagger.json", "/swagger/v1/swagger.json",
+        "/v3/api-docs", "/api-docs", "/api/openapi.json"
+    ]
+    found = []
+    for p in candidates:
+        resp = _get(urljoin(root, p))
+        if resp and resp.ok and (resp.headers.get("content-type", "").lower().startswith("application/json") or resp.text.strip().startswith("{")):
+            found.append(urljoin(root, p))
+    return found
+
+def guess_graphql_endpoints(root: str) -> List[str]:
+    candidates = ["/graphql", "/api", "/api/graphql", "/graphql/api"]
+    found = []
+    for p in candidates:
+        url = urljoin(root, p)
+        # probe with a universal query that should be harmless
+        try:
+            jr = requests.post(url, json={"query": "query{__typename}"}, headers=UA, timeout=DEFAULT_TIMEOUT)
+            if jr.status_code in (200, 400) and ("__typename" in (jr.text or "")):
+                found.append(url)
+        except Exception:
+            pass
+    return list(set(found))
+
+def extract_js_libs_and_links(soup: BeautifulSoup) -> Dict:
     """
-    Crawl website starting from the given URL.
+    Extract JS library/version hints and linked resources to help other scanners.
+    """
+    libs = []
+    links = []
+    try:
+        for s in soup.find_all("script", src=True):
+            src = s.get("src") or ""
+            links.append(src)
+            # naive lib/version extraction: jquery-3.6.0.min.js -> ("jquery", "3.6.0")
+            m = re.search(r"/?([a-z0-9\.\-_]+?)-(\d+\.\d+(?:\.\d+)?)(?:\.min)?\.js", src, flags=re.I)
+            if m:
+                libs.append({"name": m.group(1).lower(), "version": m.group(2), "src": src})
+    except Exception:
+        pass
+    return {"libs": libs, "links": links}
+
+def crawl(root: str) -> Tuple[List[str], List[Dict], Dict]:
+    """
+    Crawl website and perform discovery (robots, sitemap, Wayback, crt.sh, OpenAPI, GraphQL).
     Returns:
-        visited_urls: list of all page URLs
-        forms: list of forms with method and input names
+        visited_urls: list of page URLs (same-origin)
+        forms: list of forms with method/action/input names
+        discovery: dict with seeds, historical, subdomains, openapi_docs, graphql_endpoints, js_libs (unique list)
     """
-    visited = []
-    to_visit = [url]
-    all_forms = []
+    root = root.rstrip("/")
+    visited: List[str] = []
+    forms: List[Dict] = []
+    js_libs_unique: Dict[str, Dict] = {}
 
-    while to_visit:
-        current = to_visit.pop()
-        if current in visited:
+    # Discovery seeds
+    robot_seeds, sitemaps = robots_and_sitemap_seeds(root)
+    wayback = historical_urls_via_wayback(root, limit=50)
+    crt = subdomains_via_crtsh(root, limit=50)
+    openapi_docs = guess_openapi_paths(root)
+    graphql_eps = guess_graphql_endpoints(root)
+
+    queue: deque = deque()
+    seen: Set[str] = set()
+
+    for s in set(robot_seeds + wayback + [root]):
+        if s.startswith(root):
+            queue.append(s)
+
+    # BFS crawl (same-origin)
+    while queue and len(visited) < 250:  # cap for safety
+        current = queue.popleft()
+        if current in seen:
+            continue
+        seen.add(current)
+
+        resp = _get(current)
+        if not (resp and resp.ok):
             continue
 
+        visited.append(current)
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        # Links
         try:
-            response = requests.get(current, timeout=5)
-            visited.append(current)
-
-            soup = BeautifulSoup(response.text, "html.parser")
-
-            # Find links
-            for link in soup.find_all("a", href=True):
-                full_url = urljoin(url, link["href"])
-                if full_url not in visited and full_url.startswith(url):
-                    to_visit.append(full_url)
-
-            # Find forms
-            for form in soup.find_all("form"):
-                form_info = {
-                    "page": current,
-                    "method": form.get("method", "get").lower(),
-                    "action": form.get("action"),
-                    "inputs": [inp.get("name") for inp in form.find_all("input") if inp.get("name")]
-                }
-                all_forms.append(form_info)
-
-        except:
+            for a in soup.find_all("a", href=True):
+                full = urljoin(current, a.get("href"))
+                if same_origin(full, root) and full not in seen:
+                    queue.append(full)
+        except Exception:
             pass
 
-    return visited, all_forms
+        # Forms
+        forms.extend(parse_forms(soup, current))
+
+        # JS libs (aggregate unique)
+        js = extract_js_libs_and_links(soup)
+        for lib in js["libs"]:
+            key = f"{lib['name']}@{lib['version']}"
+            if key not in js_libs_unique:
+                js_libs_unique[key] = lib
+
+    discovery = {
+        "robots_seeds": robot_seeds,
+        "sitemaps": sitemaps,
+        "historical_urls": wayback,
+        "subdomains": crt,
+        "openapi_docs": openapi_docs,
+        "graphql_endpoints": graphql_eps,
+        "js_libs": list(js_libs_unique.values())
+    }
+    return visited, forms, discovery
