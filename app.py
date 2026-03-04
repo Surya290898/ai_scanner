@@ -75,17 +75,47 @@ def pdf_block_text(s: str, max_len: int = 8000) -> str:
 def safe_multicell(pdf: FPDF, w: float, h: float, text: str, **kwargs):
     """
     Wrapper around pdf.multi_cell that:
-      - pre-wraps long tokens, and
-      - on any FPDFException, falls back to hard 30-char line breaks.
+      - resets X to left margin (fresh line),
+      - uses the effective page width if w<=0,
+      - pre-wraps long tokens,
+      - and on any FPDFException, falls back to hard 30-char line breaks.
     """
-    prepared = pdf_block_text(text)
+    # Compute a safe effective width
+    try:
+        epw = getattr(pdf, "epw", pdf.w - pdf.l_margin - pdf.r_margin)
+    except Exception:
+        epw = pdf.w - pdf.l_margin - pdf.r_margin
+    if not w or w <= 0:
+        w = epw
+
+    # Ensure we start at left margin (so "remaining width" logic never applies)
+    try:
+        pdf.set_x(pdf.l_margin)
+    except Exception:
+        pass
+
+    # Prepare text
+    prepared = pdf_block_text(text, max_len=8000)
+    if not prepared.strip():
+        prepared = " "
+
+    # Primary attempt
     try:
         pdf.multi_cell(w, h, prepared, **kwargs)
+        return
     except Exception:
+        # Fallback: very conservative line splitting
         s = safe_text(text, max_len=8000)
         step = 30
+        try:
+            pdf.set_x(pdf.l_margin)
+        except Exception:
+            pass
         for i in range(0, len(s), step):
-            pdf.multi_cell(w, h, s[i:i+step], **kwargs)
+            chunk = s[i:i+step]
+            if not chunk.strip():
+                chunk = " "
+            pdf.multi_cell(w, h, chunk, **kwargs)
 
 def sev_color(sev: str):
     if sev == "High":
