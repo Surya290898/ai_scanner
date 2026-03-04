@@ -50,10 +50,10 @@ def safe_text(text, max_len=500):
         text = text[:max_len] + " ..."
     return text
 
-def _wrap_long_tokens(s: str, max_token_len: int = 80) -> str:
+def _wrap_long_tokens(s: str, max_token_len: int = 30) -> str:
     """
     Insert newlines into very long unbroken tokens so fpdf2 can wrap them.
-    Only ASCII-safe characters are used (no zero-width spaces).
+    Using conservative 30 chars to avoid any width overflow.
     """
     if not s:
         return ""
@@ -66,11 +66,26 @@ def _wrap_long_tokens(s: str, max_token_len: int = 80) -> str:
             out_parts.append(tok)
     return " ".join(out_parts)
 
-def pdf_block_text(s: str, max_len: int = 4000) -> str:
+def pdf_block_text(s: str, max_len: int = 8000) -> str:
     """
     Make text PDF-safe (latin-1) and also wrap long tokens to avoid FPDFException.
     """
     return _wrap_long_tokens(safe_text(s, max_len=max_len))
+
+def safe_multicell(pdf: FPDF, w: float, h: float, text: str, **kwargs):
+    """
+    Wrapper around pdf.multi_cell that:
+      - pre-wraps long tokens, and
+      - on any FPDFException, falls back to hard 30-char line breaks.
+    """
+    prepared = pdf_block_text(text)
+    try:
+        pdf.multi_cell(w, h, prepared, **kwargs)
+    except Exception:
+        s = safe_text(text, max_len=8000)
+        step = 30
+        for i in range(0, len(s), step):
+            pdf.multi_cell(w, h, s[i:i+step], **kwargs)
 
 def sev_color(sev: str):
     if sev == "High":
@@ -233,11 +248,14 @@ if st.button("Scan"):
     pdf.cell(0, 8, f"High Severity Findings: {high}", ln=True)
     pdf.cell(0, 8, f"Medium Severity Findings: {medium}", ln=True)
     pdf.ln(4)
-    pdf.multi_cell(0, 6, safe_text("Discovery: "
-                                   f"OpenAPI={len(discovery.get('openapi_docs', []))}, "
-                                   f"GraphQL={len(discovery.get('graphql_endpoints', []))}, "
-                                   f"Historical={len(discovery.get('historical_urls', []))}, "
-                                   f"Subdomains={len(discovery.get('subdomains', []))}"))
+    safe_multicell(
+        pdf, 0, 6,
+        "Discovery: "
+        f"OpenAPI={len(discovery.get('openapi_docs', []))}, "
+        f"GraphQL={len(discovery.get('graphql_endpoints', []))}, "
+        f"Historical={len(discovery.get('historical_urls', []))}, "
+        f"Subdomains={len(discovery.get('subdomains', []))}"
+    )
 
     # Detailed: Pages
     for item in results[:200]:
@@ -263,7 +281,7 @@ if st.button("Scan"):
             pdf.set_font("Helvetica", "B", 12)
             pdf.cell(0, 8, "Header Analysis:", ln=True)
             pdf.set_font("Helvetica", "", 11)
-            pdf.multi_cell(0, 6, pdf_block_text(json.dumps(h, indent=2)))
+            safe_multicell(pdf, 0, 6, json.dumps(h, indent=2))
 
         # AI-style findings
         af = item.get("ai_findings")
@@ -277,13 +295,13 @@ if st.button("Scan"):
                 pdf.cell(0, 6, f"- {safe_text(f.get('type'))} (Severity: {sev})", ln=True)
                 pdf.set_text_color(0, 0, 0)
                 pdf.set_font("Helvetica", "", 11)
-                pdf.multi_cell(0, 5, pdf_block_text(f"Description: {f.get('description', '')}"))
-                pdf.multi_cell(0, 5, pdf_block_text(f"Impact: {f.get('impact', '')}"))
-                pdf.multi_cell(0, 5, pdf_block_text(f"Remediation: {f.get('remediation', '')}"))
+                safe_multicell(pdf, 0, 5, f"Description: {f.get('description', '')}")
+                safe_multicell(pdf, 0, 5, f"Impact: {f.get('impact', '')}")
+                safe_multicell(pdf, 0, 5, f"Remediation: {f.get('remediation', '')}")
                 pdf.ln(1)
         elif isinstance(af, dict):
             pdf.set_font("Helvetica", "", 11)
-            pdf.multi_cell(0, 6, pdf_block_text(json.dumps(af, indent=2)))
+            safe_multicell(pdf, 0, 6, json.dumps(af, indent=2))
 
     # Forms section
     if form_results:
@@ -292,7 +310,7 @@ if st.button("Scan"):
         pdf.cell(0, 10, "Forms Testing", ln=True)
         pdf.set_font("Helvetica", "", 11)
         for fr in form_results[:100]:
-            pdf.multi_cell(0, 6, pdf_block_text(json.dumps(fr, indent=2)))
+            safe_multicell(pdf, 0, 6, json.dumps(fr, indent=2))
             pdf.ln(1)
 
     # OpenAPI section
@@ -302,7 +320,7 @@ if st.button("Scan"):
         pdf.cell(0, 10, "OpenAPI Checks (Basic)", ln=True)
         pdf.set_font("Helvetica", "", 11)
         for oa in openapi_results:
-            pdf.multi_cell(0, 6, pdf_block_text(json.dumps(oa, indent=2)))
+            safe_multicell(pdf, 0, 6, json.dumps(oa, indent=2))
             pdf.ln(1)
 
     # GraphQL section
@@ -312,7 +330,7 @@ if st.button("Scan"):
         pdf.cell(0, 10, "GraphQL Probes", ln=True)
         pdf.set_font("Helvetica", "", 11)
         for g in gql_results:
-            pdf.multi_cell(0, 6, pdf_block_text(json.dumps(g, indent=2)))
+            safe_multicell(pdf, 0, 6, json.dumps(g, indent=2))
             pdf.ln(1)
 
     filename = "scan_report.pdf"
