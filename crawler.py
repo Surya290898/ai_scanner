@@ -225,4 +225,3 @@ def crawl(root: str) -> Tuple[List[str], List[Dict], Dict]:
         "js_libs": list(js_libs_unique.values())
     }
     return visited, forms, discovery
-``
