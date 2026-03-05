@@ -1,9 +1,8 @@
 # crawler.py
 import json
-import os
 import re
 from collections import deque
-from typing import Callable, Dict, List, Optional, Set, Tuple, Union
+from typing import Dict, List, Set, Tuple
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -25,13 +24,6 @@ def _get(url: str, allow_redirects: bool = True):
         return requests.get(url, headers=UA, timeout=DEFAULT_TIMEOUT, allow_redirects=allow_redirects)
     except Exception:
         return None
-
-def _safe_add(url: str, base: str, queue: deque, seen: Set[str]):
-    if not url:
-        return
-    full = urljoin(base, url)
-    if full not in seen and full.startswith(base):
-        queue.append(full)
 
 def parse_forms(soup: BeautifulSoup, page_url: str) -> List[Dict]:
     forms = []
