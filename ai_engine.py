@@ -75,7 +75,7 @@ def analyze_response(response_text: str,
                  "Pages could be embedded in iframes to trick users into unwanted clicks.",
                  "Set 'Content-Security-Policy: frame-ancestors 'none';' (recommended) or 'X-Frame-Options: DENY'.")
 
-    # CSP quality hints
+    # CSP quality hints (light local evaluator)
     if csp:
         lc = csp.lower()
         weak_bits = []
@@ -94,7 +94,7 @@ def analyze_response(response_text: str,
         _add(findings, "Missing Security Header", "Low",
              "No Content-Security-Policy header detected.",
              "Lack of CSP removes a key browser-enforced mitigation for XSS and clickjacking.",
-             "Add a strict CSP with nonces/hashes and frame-ancestors.")
+             "Add a strict CSP with nonces(/hashes) and frame-ancestors.")
 
     # HSTS
     if url.startswith("https://") and not hsts:
@@ -137,7 +137,8 @@ def analyze_response(response_text: str,
     # ----------------------------
     # Mixed content hint (if https and body links to http)
     # ----------------------------
-    if url.startswith("https://") and ('src="http://' in text or 'href="http://' in text):
+    if url.startswith("https://") and ('src="http://' in text or "src='http://" in text or
+                                       'href="http://' in text or "href='http://" in text):
         _add(findings, "Mixed Content", "Medium",
              "HTTPS page links or loads HTTP resources.",
              "Breaks transport security and can lead to code/data injection.",
