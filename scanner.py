@@ -1,19 +1,21 @@
 # scanner.py
 import json
 import time
-from typing import Dict, List, Any, Optional
-from urllib.parse import urlparse
+import random
+import string
+from typing import Dict, List, Any, Optional, Tuple
+from urllib.parse import urlparse, urljoin
 
 import requests
+from bs4 import BeautifulSoup
 
 DEFAULT_TIMEOUT = 12
-UA = {"User-Agent": "AI-Security-Scanner/2.0 (+local)"}
+UA = {"User-Agent": "AI-Security-Scanner/2.1 (+local)"}
 
-# ------------------------------------
-# Core simple tests (kept from your original)
-# ------------------------------------
+# ----------------------------
+# Core simple tests (existing)
+# ----------------------------
 def test_sqli(url: str) -> bool:
-    """Benign SQLi error heuristic."""
     payload = "' OR '1'='1"
     try:
         r = requests.get(url, params={"test": payload}, headers=UA, timeout=DEFAULT_TIMEOUT)
@@ -26,7 +28,6 @@ def test_sqli(url: str) -> bool:
         return False
 
 def test_xss(url: str) -> bool:
-    """Simple XSS reflection check using HTML and encoded variants."""
     raw = "<script>alert(1)</script>"
     enc = "&lt;script&gt;alert(1)&lt;/script&gt;"
     try:
@@ -41,13 +42,11 @@ def test_xss(url: str) -> bool:
         return False
 
 def test_form(form: Dict) -> Dict:
-    """Test a form for XSS on its input fields (safe payloads, GET/POST)."""
     url = form.get("action") or form.get("page")
     method = (form.get("method") or "get").lower()
     data = {}
     results = {}
     payload = "<script>alert(1)</script>"
-
     for name in form.get("inputs", []):
         try:
             data[name] = payload
@@ -66,9 +65,9 @@ def test_form(form: Dict) -> Dict:
             data[name] = ""
     return results
 
-# ------------------------------------
-# Headers / Policy analyzers
-# ------------------------------------
+# ----------------------------
+# Header analyzers (existing)
+# ----------------------------
 def csp_evaluator(csp_header: str) -> str:
     if not csp_header:
         return "No Content-Security-Policy header found"
@@ -87,10 +86,6 @@ def csp_evaluator(csp_header: str) -> str:
     return "Strong CSP configuration" if not warnings else "Weak CSP: " + ", ".join(warnings)
 
 def headers_analyzer(url: str) -> Dict:
-    """
-    Fetch the URL and return a summarized view of security-relevant headers
-    so the report can show CSP/HSTS/CORS/etc. for that page.
-    """
     out: Dict = {}
     try:
         r = requests.get(url, headers=UA, timeout=DEFAULT_TIMEOUT)
@@ -106,26 +101,21 @@ def headers_analyzer(url: str) -> Dict:
             "access-control-allow-origin": h.get("access-control-allow-origin", ""),
             "access-control-allow-credentials": h.get("access-control-allow-credentials", "")
         }
-        # capture raw for cookie analysis
         out["set-cookie"] = r.headers.get("set-cookie", "")
     except Exception:
         out["status"] = "request failed"
     return out
 
-# ------------------------------------
-# GraphQL (unchanged)
-# ------------------------------------
+# ----------------------------
+# GraphQL / OpenAPI (existing)
+# ----------------------------
 def graphql_probe(endpoint: str) -> Dict:
-    """
-    Check if GraphQL introspection is enabled (light touch).
-    """
     result = {"endpoint": endpoint, "introspection": "Unknown"}
     try:
         r = requests.post(endpoint, json={"query": "query{__typename}"}, headers=UA, timeout=DEFAULT_TIMEOUT)
         if r.status_code not in (200, 400):
             result["introspection"] = "Not reachable"
             return result
-
         iq = {"query": "{__schema{queryType{name}}}"}
         ri = requests.post(endpoint, json=iq, headers=UA, timeout=DEFAULT_TIMEOUT)
         txt = (ri.text or "").lower()
@@ -139,13 +129,7 @@ def graphql_probe(endpoint: str) -> Dict:
         result["introspection"] = "Probe failed"
     return result
 
-# ------------------------------------
-# OpenAPI (basic lint)
-# ------------------------------------
 def openapi_fetch_and_lint(url: str) -> Dict:
-    """
-    Fetch OpenAPI JSON and run a few basic checks (no 3rd-party linter needed).
-    """
     res = {"url": url, "fetched": False, "issues": []}
     try:
         r = requests.get(url, headers=UA, timeout=DEFAULT_TIMEOUT)
@@ -153,7 +137,6 @@ def openapi_fetch_and_lint(url: str) -> Dict:
             return res
         data = json.loads(r.text)
         res["fetched"] = True
-
         servers = data.get("servers", [])
         if servers:
             for s in servers:
@@ -162,149 +145,242 @@ def openapi_fetch_and_lint(url: str) -> Dict:
                     res["issues"].append("Server URL uses http://; prefer https://")
         else:
             res["issues"].append("No 'servers' section declared")
-
         comps = data.get("components", {})
         sec = comps.get("securitySchemes", {})
         if not sec:
             res["issues"].append("No components.securitySchemes defined")
         if not data.get("security"):
             res["issues"].append("No global 'security' requirement defined")
-
     except Exception:
         pass
     return res
 
 # =====================================================================
-# NEW: External Integrations + Local Enhanced Tests
+# NEW: Safe Authentication Surface Checks (non-intrusive)
 # =====================================================================
 
-def _host_of(url: str) -> str:
-    try:
-        return urlparse(url).hostname or url
-    except Exception:
-        return url
+CSRF_CANDIDATE_NAMES = [
+    "csrf", "csrf-token", "csrf_token", "authenticity_token",
+    "__requestverificationtoken", "__csrf", "_csrf", "xsrf-token", "x-csrf-token"
+]
 
-# ----------------- CSP: Csper.io, Mozilla Observatory, CentralCSP (optional)
-def csper_evaluate_url(url: str) -> Dict:
-    """
-    Uses Csper.io public API endpoint to evaluate CSP for a given URL.
-    Returns {} if service not reachable.
-    """
+def _fetch(session: requests.Session, url: str) -> Optional[requests.Response]:
     try:
-        api = "https://csper.io/api/evaluations"
-        r = requests.post(api, json={"URL": url}, headers=UA, timeout=DEFAULT_TIMEOUT)
-        if r.ok:
-            return r.json()
+        return session.get(url, headers=UA, timeout=DEFAULT_TIMEOUT)
     except Exception:
-        pass
-    return {}
+        return None
 
-def mozilla_observatory_scan(host: str, rescan: bool = True) -> Dict:
-    """
-    Uses Mozilla Observatory API v2. Kicks off a scan then fetches results.
-    """
-    base = "https://observatory-api.mdn.mozilla.net/api/v2"
-    out = {"host": host, "scan": {}, "tests": {}}
+def _post(session: requests.Session, url: str, data: Dict[str, str], referer: Optional[str] = None) -> Optional[requests.Response]:
     try:
-        # Start scan
-        r = requests.post(f"{base}/scan", json={"host": host, "rescan": rescan}, headers=UA, timeout=DEFAULT_TIMEOUT)
-        if not r.ok:
-            return out
-        scan_meta = r.json()
-        out["scan"] = scan_meta
-
-        # Poll results
-        tries = 0
-        while tries < 20:
-            time.sleep(3)
-            rr = requests.get(f"{base}/scan?host={host}", headers=UA, timeout=DEFAULT_TIMEOUT)
-            if rr.ok:
-                s = rr.json()
-                out["scan"] = s
-                # FINISHED or grade present -> fetch tests
-                state = (s.get("scan") or {}).get("state") or s.get("state")
-                grade = (s.get("scan") or {}).get("grade") or s.get("grade")
-                if state == "FINISHED" or grade:
-                    rres = requests.get(f"{base}/results?host={host}", headers=UA, timeout=DEFAULT_TIMEOUT)
-                    if rres.ok:
-                        out["tests"] = rres.json()
-                    break
-            tries += 1
+        h = {**UA}
+        if referer:
+            h["Referer"] = referer
+        return session.post(url, data=data, headers=h, timeout=DEFAULT_TIMEOUT, allow_redirects=True)
     except Exception:
-        pass
+        return None
+
+def _find_password_forms(html: str, base_url: str) -> List[Dict[str, Any]]:
+    out = []
+    soup = BeautifulSoup(html or "", "html.parser")
+    for form in soup.find_all("form"):
+        method = (form.get("method") or "get").lower()
+        action = urljoin(base_url, form.get("action") or base_url)
+        inputs = []
+        has_pwd = False
+        csrf_present = False
+        for inp in form.find_all("input"):
+            name = inp.get("name")
+            itype = (inp.get("type") or "").lower()
+            if name:
+                inputs.append({"name": name, "type": itype, "value": inp.get("value") or ""})
+            if itype == "password":
+                has_pwd = True
+            if itype == "hidden":
+                nm = (name or "").lower()
+                if any(c in nm for c in CSRF_CANDIDATE_NAMES):
+                    csrf_present = True
+        # meta csrf?
+        for meta in soup.find_all("meta"):
+            nm = (meta.get("name") or "").lower()
+            if any(c == nm for c in CSRF_CANDIDATE_NAMES):
+                csrf_present = True
+        if has_pwd:
+            out.append({
+                "method": method,
+                "action": action,
+                "inputs": inputs,
+                "csrf_token_present": csrf_present
+            })
     return out
 
-def centralcsp_scan(url: str, api_key: Optional[str]) -> Dict:
+def _has_loginish_url(u: str) -> bool:
+    u = (u or "").lower()
+    return any(x in u for x in ("/login", "/signin", "/account/login", "/users/sign_in", "/auth/login"))
+
+def _random_email(domain_hint: str = "example.com") -> str:
+    left = "".join(random.choices(string.ascii_lowercase, k=8))
+    return f"{left}@{domain_hint}"
+
+def _username_enum_hint(res_a: requests.Response, res_b: requests.Response) -> Optional[str]:
     """
-    Optional CentralCSP API scan (requires API key). Returns {} if not configured/available.
+    Heuristic: if content length differs significantly for two invalid users,
+    this may hint username enumeration via error messages. Non-binding.
     """
-    if not api_key:
-        return {}
     try:
-        api = "https://api.centralcsp.com/scanner/scan"
-        h = {"Authorization": api_key, **UA}
-        r = requests.post(api, json={"url": url}, headers=h, timeout=DEFAULT_TIMEOUT)
-        if r.ok:
-            return r.json()
+        a = res_a.text or ""
+        b = res_b.text or ""
+        if abs(len(a) - len(b)) > 100:
+            return "Different error sizes for distinct fake usernames (possible username enumeration hint)."
     except Exception:
         pass
-    return {}
+    return None
 
-# ----------------- HTTP headers / SecurityHeaders.com
-def securityheaders_scan(host: str, api_key: Optional[str]) -> Dict:
+def auth_surface_checks(root: str, pages: List[str], max_attempts_per_login: int = 3) -> Dict[str, Any]:
     """
-    Optional securityheaders.com API. Requires x-api-key.
+    Non-intrusive authentication posture assessment:
+      - Map login forms
+      - Check HTTPS & POST usage
+      - Detect CSRF token presence
+      - Evaluate session cookie flags via response headers
+      - Small, capped failed attempts (<=3) to observe lockout/rate-limit/captcha signals
+      - Optional username-enumeration hint via message size delta
+    Never performs brute-force or large-scale guessing.
     """
-    if not api_key:
-        return {}
-    try:
-        u = f"https://api.securityheaders.com/?q={host}&hide=on&followRedirects=on"
-        r = requests.get(u, headers={"x-api-key": api_key, **UA}, timeout=DEFAULT_TIMEOUT)
-        if r.ok:
-            return r.json()
-    except Exception:
-        pass
-    return {}
+    session = requests.Session()
+    session.headers.update(UA)
 
-# ----------------- SSL Labs
-def ssllabs_scan(host: str, start_new: bool = True) -> Dict:
-    """
-    Polls Qualys SSL Labs (v3) API for a full assessment.
-    """
-    base = "https://api.ssllabs.com/api/v3"
-    params = {"host": host, "publish": "off", "all": "done"}
-    if start_new:
-        params["startNew"] = "on"
-    try:
-        # Start / check
-        r = requests.get(f"{base}/analyze", params=params, headers=UA, timeout=DEFAULT_TIMEOUT)
-        if not r.ok:
-            return {}
-        data = r.json()
-        # Poll until READY or ERROR
-        tries = 0
-        while data.get("status") not in ("READY", "ERROR") and tries < 40:
-            time.sleep(10)
-            r = requests.get(f"{base}/analyze", params={"host": host}, headers=UA, timeout=DEFAULT_TIMEOUT)
-            if not r.ok:
-                break
-            data = r.json()
-            tries += 1
-        return data
-    except Exception:
-        return {}
+    candidates = []
+    for p in pages:
+        if _has_loginish_url(p):
+            candidates.append(p)
+    # Also test root for links to login
+    if root not in candidates:
+        candidates = [root] + candidates
+    candidates = list(dict.fromkeys(candidates))[:20]  # cap
 
-# ----------------- CORS tests (local)
+    findings: List[Dict[str, Any]] = []
+    for page in candidates:
+        r = _fetch(session, page)
+        if not (r and r.ok):
+            continue
+        pwd_forms = _find_password_forms(r.text, page)
+        # record cookie attributes (high level)
+        set_cookie = r.headers.get("Set-Cookie", "")
+        cookie_issues = []
+        if set_cookie:
+            lower = set_cookie.lower()
+            if "secure" not in lower:
+                cookie_issues.append("Missing Secure on Set-Cookie")
+            if "httponly" not in lower:
+                cookie_issues.append("Missing HttpOnly on Set-Cookie")
+            if "samesite" not in lower:
+                cookie_issues.append("Missing SameSite on Set-Cookie")
+
+        for f in pwd_forms:
+            issues = []
+            # HTTPS & method
+            if not f["action"].startswith("https://") or not page.startswith("https://"):
+                issues.append("Login form/page not fully over HTTPS")
+            if f["method"] != "post":
+                issues.append("Login form uses GET instead of POST")
+            if not f["csrf_token_present"]:
+                issues.append("No obvious anti-CSRF token in form or meta")
+
+            # small, capped failed attempts for signals (not brute-force)
+            lockout_signal = None
+            enum_hint = None
+            try:
+                action = f["action"]
+                # pick username and password field names (best-effort)
+                uname_field = None
+                pass_field = None
+                for i in f["inputs"]:
+                    t = (i.get("type") or "").lower()
+                    n = (i.get("name") or "").lower()
+                    if t == "password" and not pass_field:
+                        pass_field = i["name"]
+                    if n in ("username", "email", "user", "login", "user[email]", "user[login]") and not uname_field:
+                        uname_field = i["name"]
+                # if we couldn't detect required fields, skip active checks
+                if uname_field and pass_field:
+                    # prepare 2 distinct fake usernames for enum hint
+                    domain_hint = urlparse(root).hostname or "example.com"
+                    u1 = _random_email(domain_hint)
+                    u2 = _random_email(domain_hint)
+                    payload_base = {}
+                    for i in f["inputs"]:
+                        # keep other hidden/default inputs (e.g., CSRF) as-is
+                        if i["name"] not in (uname_field, pass_field):
+                            payload_base[i["name"]] = i.get("value") or ""
+
+                    # attempt #1
+                    data1 = dict(payload_base)
+                    data1[uname_field] = u1
+                    data1[pass_field]  = "Wrong#12345"
+                    res1 = _post(session, action, data1, referer=page)
+
+                    time.sleep(0.8)
+
+                    # attempt #2
+                    data2 = dict(payload_base)
+                    data2[uname_field] = u2
+                    data2[pass_field]  = "Wrong#12345"
+                    res2 = _post(session, action, data2, referer=page)
+
+                    # cap attempts: third only if we saw explicit signals missing
+                    res3 = None
+                    if max_attempts_per_login >= 3:
+                        time.sleep(0.8)
+                        data3 = dict(payload_base)
+                        data3[uname_field] = u2
+                        data3[pass_field]  = "Wrong#12345"
+                        res3 = _post(session, action, data3, referer=page)
+
+                    # look for basic lockout/rate-limit cues
+                    for rr in [res1, res2, res3]:
+                        if not rr:
+                            continue
+                        txt = (rr.text or "").lower()
+                        if any(s in txt for s in ["too many attempts", "locked", "try again later", "captcha"]):
+                            lockout_signal = "Lockout/CAPTCHA message visible after few failed attempts"
+                            break
+                        if rr.headers.get("Retry-After") or rr.headers.get("X-RateLimit-Remaining"):
+                            lockout_signal = "Rate-limiting headers present after failed attempts"
+                            break
+
+                    # username-enumeration hint
+                    if res1 and res2:
+                        enum_hint = _username_enum_hint(res1, res2)
+            except Exception:
+                pass
+
+            details = {
+                "login_page": page,
+                "action": f["action"],
+                "method": f["method"],
+                "csrf_token_present": f["csrf_token_present"],
+                "cookie_issues": cookie_issues,
+                "issues": issues,
+                "signals": {
+                    "lockout_or_rate_limit": lockout_signal,
+                    "username_enumeration_hint": enum_hint
+                }
+            }
+            findings.append(details)
+
+    return {
+        "root": root,
+        "logins_assessed": len(findings),
+        "findings": findings
+    }
+
+# ----------------------------
+# Other utilities (existing)
+# ----------------------------
 def cors_tests(url: str, test_origin: str = "https://example.com") -> Dict:
-    """
-    Perform a lightweight CORS preflight (OPTIONS) and simple GET with Origin.
-    """
     results = {"preflight": {}, "simple": {}}
     try:
-        # Preflight
-        h = {"Origin": test_origin,
-             "Access-Control-Request-Method": "GET",
-             **UA}
+        h = {"Origin": test_origin, "Access-Control-Request-Method": "GET", **UA}
         o = requests.options(url, headers=h, timeout=DEFAULT_TIMEOUT)
         results["preflight"] = {
             "status": getattr(o, "status_code", "n/a"),
@@ -317,7 +393,6 @@ def cors_tests(url: str, test_origin: str = "https://example.com") -> Dict:
         results["preflight"] = {"status": "request failed"}
 
     try:
-        # Simple GET with Origin
         g = requests.get(url, headers={"Origin": test_origin, **UA}, timeout=DEFAULT_TIMEOUT)
         results["simple"] = {
             "status": getattr(g, "status_code", "n/a"),
@@ -328,38 +403,21 @@ def cors_tests(url: str, test_origin: str = "https://example.com") -> Dict:
         results["simple"] = {"status": "request failed"}
     return results
 
-# ----------------- Redirect chain (local)
 def redirect_chain(url: str) -> List[Dict[str, Any]]:
-    """
-    Follow redirects locally and return the hop chain.
-    """
     chain: List[Dict[str, Any]] = []
     try:
         r = requests.get(url, headers=UA, timeout=DEFAULT_TIMEOUT, allow_redirects=True)
         for hop in r.history:
-            chain.append({
-                "url": hop.url,
-                "status": hop.status_code,
-                "location": hop.headers.get("Location", "")
-            })
-        chain.append({
-            "url": r.url,
-            "status": r.status_code,
-            "location": ""
-        })
+            chain.append({"url": hop.url, "status": hop.status_code, "location": hop.headers.get("Location", "")})
+        chain.append({"url": r.url, "status": r.status_code, "location": ""})
     except Exception:
         pass
     return chain
 
-# ----------------- Cookie security analysis (local)
 def analyze_cookies_from_headers(set_cookie_header: str) -> List[Dict[str, Any]]:
-    """
-    Analyzes Set-Cookie header text, flags missing attributes & weak patterns.
-    """
     cookies: List[Dict[str, Any]] = []
     if not set_cookie_header:
         return cookies
-    # naive split on comma may break if Expires contains commas; split on set-cookie delimiters via '\n' fallback
     parts = [p.strip() for p in set_cookie_header.replace("\r", "\n").split("\n") if p.strip()]
     for raw in parts:
         segs = [raw]
@@ -392,11 +450,7 @@ def analyze_cookies_from_headers(set_cookie_header: str) -> List[Dict[str, Any]]
             cookies.append({"cookie": name, "attributes": flags, "issues": risk})
     return cookies
 
-# ----------------- Mixed content (local)
 def find_mixed_content(html: str) -> List[str]:
-    """
-    Searches for http:// resource references inside HTML.
-    """
     if not html:
         return []
     out: List[str] = []
@@ -408,16 +462,11 @@ def find_mixed_content(html: str) -> List[str]:
             j = lowers.find(m, idx)
             if j == -1:
                 break
-            out.append(html[j:j+200])  # snippet context
+            out.append(html[j:j+200])
             idx = j + len(m)
     return out
 
-# ----------------- Correlation helpers
 def correlate_csp(csper: Dict, observatory: Dict, local_summary: str, central: Dict) -> Dict:
-    """
-    Merge CSP observations into a unified summary.
-    """
-    # try to pull a grade from observatory (handles both 'scan' and nested 'scan.scan' forms)
     obs_grade = None
     try:
         obs_grade = (observatory.get("scan") or {}).get("grade") \
@@ -433,7 +482,6 @@ def correlate_csp(csper: Dict, observatory: Dict, local_summary: str, central: D
         "centralcsp": central if central else {},
         "overall": "See sources"
     }
-    # very lightweight "overall" verdict
     flags = []
     if isinstance(local_summary, str) and local_summary.startswith("Weak CSP"):
         flags.append("local-weak")
@@ -448,19 +496,11 @@ def correlate_csp(csper: Dict, observatory: Dict, local_summary: str, central: D
     summary["overall"] = "Needs hardening" if flags else "Looks reasonable (verify details)"
     return summary
 
-
-# Explicit exports so star/tuple imports don’t miss anything
 __all__ = [
-    # core tests
     "test_sqli", "test_xss", "test_form",
-    # analyzers
     "headers_analyzer", "csp_evaluator",
-    # graphql/openapi
     "graphql_probe", "openapi_fetch_and_lint",
-    # new integrations
-    "csper_evaluate_url", "mozilla_observatory_scan", "centralcsp_scan",
-    "securityheaders_scan", "ssllabs_scan",
-    # local tests
+    "auth_surface_checks",  # NEW
     "cors_tests", "redirect_chain", "analyze_cookies_from_headers",
     "find_mixed_content", "correlate_csp",
 ]
