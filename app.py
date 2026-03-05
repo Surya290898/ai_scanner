@@ -18,19 +18,13 @@ from crawler import crawl
 # Robust import (handles stale module caches / name collisions)
 try:
     from scanner import (
-        headers_analyzer,
-        test_sqli,
-        test_xss,
-        test_form,
-        graphql_probe,
-        openapi_fetch_and_lint,
-        # safe auth checks
-        auth_surface_checks,
-        # misc
-        cors_tests,
-        redirect_chain,
-        analyze_cookies_from_headers,
-        find_mixed_content,
+        # classic checks
+        headers_analyzer, test_sqli, test_xss, test_form,
+        graphql_probe, openapi_fetch_and_lint,
+        cors_tests, redirect_chain,
+        analyze_cookies_from_headers, find_mixed_content,
+        # NEW: authentication security audit (safe mode)
+        auth_security_audit,
     )
 except Exception:
     import importlib, scanner as _scanner
@@ -41,11 +35,11 @@ except Exception:
     test_form = getattr(_scanner, "test_form")
     graphql_probe = getattr(_scanner, "graphql_probe")
     openapi_fetch_and_lint = getattr(_scanner, "openapi_fetch_and_lint")
-    auth_surface_checks = getattr(_scanner, "auth_surface_checks")
     cors_tests = getattr(_scanner, "cors_tests")
     redirect_chain = getattr(_scanner, "redirect_chain")
     analyze_cookies_from_headers = getattr(_scanner, "analyze_cookies_from_headers")
     find_mixed_content = getattr(_scanner, "find_mixed_content")
+    auth_security_audit = getattr(_scanner, "auth_security_audit")
 
 # -------------- Streamlit page setup --------------
 st.set_page_config(page_title="AI Website Security Scanner", layout="wide")
@@ -129,22 +123,25 @@ class PDF(FPDF):
 with st.sidebar:
     st.subheader("Discovery & Checks")
     do_discovery = st.checkbox("Use internet-assisted discovery (robots/sitemap/Wayback/crt.sh)", value=True)
-    do_headers = st.checkbox("Analyze security headers (CSP/HSTS/CORS/etc.)", value=True)
-    do_graphql = st.checkbox("Probe GraphQL endpoints (introspection)", value=True)
-    do_openapi = st.checkbox("Fetch & basic-lint OpenAPI docs", value=True)
-    do_forms = st.checkbox("Test discovered forms for XSS (safe payload)", value=True)
-    do_ai = st.checkbox("AI-style page review (local heuristics)", value=True)
+    do_headers   = st.checkbox("Analyze security headers (CSP/HSTS/CORS/etc.)", value=True)
+    do_graphql   = st.checkbox("Probe GraphQL endpoints (introspection)", value=True)
+    do_openapi   = st.checkbox("Fetch & basic-lint OpenAPI docs", value=True)
+    do_forms     = st.checkbox("Test discovered forms for XSS (safe payload)", value=True)
+    do_ai        = st.checkbox("AI-style page review (local heuristics)", value=True)
 
     st.markdown("---")
-    st.subheader("Sensitive Areas (safe-only)")
-    do_auth_surface = st.checkbox("Auth surface checks (safe, non-intrusive)", value=True)
-    do_cors = st.checkbox("CORS tests (preflight + simple)", value=False)
+    st.subheader("Authentication Security Auditor")
+    do_auth_audit = st.checkbox("Run Authentication Security Auditor (safe mode)", value=True)
+
+    st.markdown("---")
+    st.subheader("Other utilities")
+    do_cors      = st.checkbox("CORS tests (preflight + simple)", value=False)
     do_redirects = st.checkbox("Redirect tests (full chain)", value=False)
-    do_cookies = st.checkbox("Cookie security (Set-Cookie flags)", value=False)
-    do_mixed = st.checkbox("Mixed content checks (local)", value=False)
+    do_cookies   = st.checkbox("Cookie security (Set-Cookie flags)", value=False)
+    do_mixed     = st.checkbox("Mixed content checks (local)", value=False)
 
 url = st.text_input("Enter your website URL (include https://)")
-st.caption("Note: This scanner avoids brute‑forcing or exploit attempts. Auth checks are capped and defensive.")
+st.caption("Auth Auditor is non-intrusive: it checks CSRF/HTTPS/session/captcha/lockout/username-enum *signals* with strict caps—no brute‑forcing or exploit attempts.")
 
 # ------------------------------------
 # Main workflow
@@ -182,7 +179,7 @@ if st.button("Scan"):
         if do_headers:
             item["headers"] = headers_analyzer(page)
         item["sqli"] = "Possible SQL Injection" if test_sqli(page) else "No SQL Injection"
-        item["xss"] = "Possible XSS" if test_xss(page) else "No XSS"
+        item["xss"]  = "Possible XSS"          if test_xss(page)  else "No XSS"
 
         if do_ai or do_cookies or do_mixed:
             try:
@@ -235,15 +232,17 @@ if st.button("Scan"):
             openapi_results.append(openapi_fetch_and_lint(doc))
         st.success("OpenAPI checks complete.")
 
-    # Auth Surface (safe)
-    auth_results = {}
-    if do_auth_surface:
-        st.info("Running authentication surface checks (safe)...")
+    # -------------------------------
+    # Authentication Security Auditor
+    # -------------------------------
+    auth_audit = {}
+    if do_auth_audit:
+        st.info("Running Authentication Security Auditor (safe mode)...")
         try:
-            auth_results = auth_surface_checks(url, pages)
+            auth_audit = auth_security_audit(url, pages)
         except Exception as e:
-            auth_results = {"error": f"auth surface checks failed: {e}"}
-        st.success("Auth surface checks complete.")
+            auth_audit = {"error": f"auth audit failed: {e}"}
+        st.success("Authentication audit complete.")
 
     # CORS & Redirects
     cors_out = {}
@@ -280,7 +279,7 @@ if st.button("Scan"):
         if isinstance(ai, list):
             for f in ai:
                 sev = (f.get("severity") or "").strip()
-                if sev == "High": high += 1
+                if sev == "High":   high += 1
                 elif sev == "Medium": medium += 1
 
     pdf.add_page()
@@ -291,8 +290,14 @@ if st.button("Scan"):
     pdf.cell(0, 8, f"Total Pages Scanned: {len(results)}", ln=True)
     pdf.cell(0, 8, f"High Severity Findings: {high}", ln=True)
     pdf.cell(0, 8, f"Medium Severity Findings: {medium}", ln=True)
+
+    # Auth score (if available)
+    if do_auth_audit and isinstance(auth_audit, dict) and auth_audit.get("score") is not None:
+        pdf.cell(0, 8, f"Authentication Security Score: {auth_audit['score']}/100", ln=True)
+
     pdf.ln(4)
-    safe_multicell(pdf, 0, 6,
+    safe_multicell(
+        pdf, 0, 6,
         "Discovery: "
         f"OpenAPI={len(discovery.get('openapi_docs', []))}, "
         f"GraphQL={len(discovery.get('graphql_endpoints', []))}, "
@@ -300,17 +305,16 @@ if st.button("Scan"):
         f"Subdomains={len(discovery.get('subdomains', []))}"
     )
 
-    # Auth Surface Section
-    if do_auth_surface:
+    # Authentication Audit Section
+    if do_auth_audit:
         pdf.add_page()
         pdf.set_font("Helvetica", "B", 14)
-        pdf.cell(0, 10, "Authentication Surface (Safe Checks)", ln=True)
+        pdf.cell(0, 10, "Authentication Security Auditor (Safe Mode)", ln=True)
         pdf.set_font("Helvetica", "", 11)
         safe_multicell(pdf, 0, 6,
-            "These checks are non-intrusive and capped (≤3 failed attempts) to reveal lack of CSRF/HTTPS/lockout/rate-limiting and username-enumeration hints. "
-            "No brute-forcing or exploit attempts are performed."
-        )
-        safe_multicell(pdf, 0, 6, json.dumps(auth_results, indent=2))
+            "Assesses CSRF/HTTPS/session flags, login behavior, username‑enum hints, lockout/rate‑limit signals, "
+            "MFA/password policy/session/log‑out CSRF hints, sensitive endpoints and API auth misconfig—all non‑intrusively.")
+        safe_multicell(pdf, 0, 6, json.dumps(auth_audit, indent=2))
 
     # Detailed: Pages
     for item in results[:200]:
@@ -367,7 +371,6 @@ if st.button("Scan"):
             pdf.set_font("Helvetica", "", 11)
             safe_multicell(pdf, 0, 6, json.dumps(af, indent=2))
 
-    # CORS / Redirect sections (optional)
     if do_cors and cors_out:
         pdf.add_page()
         pdf.set_font("Helvetica", "B", 14)
@@ -392,6 +395,6 @@ if st.button("Scan"):
         st.error(f"Failed to generate PDF: {e}")
 
     # In-app JSON views
-    if do_auth_surface:
-        with st.expander("Auth Surface (JSON)"):
-            st.json(auth_results)
+    if do_auth_audit:
+        with st.expander("Auth Auditor JSON"):
+            st.json(auth_audit)
