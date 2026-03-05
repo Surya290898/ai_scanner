@@ -213,9 +213,7 @@ def mozilla_observatory_scan(host: str, rescan: bool = True) -> Dict:
         scan_meta = r.json()
         out["scan"] = scan_meta
 
-        # Poll results if we received an id
-        scan_id = scan_meta.get("scan", {}).get("id")
-        # v2 also supports direct /scan?host=...
+        # Poll results
         tries = 0
         while tries < 20:
             time.sleep(3)
@@ -223,9 +221,10 @@ def mozilla_observatory_scan(host: str, rescan: bool = True) -> Dict:
             if rr.ok:
                 s = rr.json()
                 out["scan"] = s
-                # If finished, request tests
-                if s.get("scan", {}).get("state") in ("FINISHED", "FAILED") or s.get("scan", {}).get("grade"):
-                    # results endpoint
+                # FINISHED or grade present -> fetch tests
+                state = (s.get("scan") or {}).get("state") or s.get("state")
+                grade = (s.get("scan") or {}).get("grade") or s.get("grade")
+                if state == "FINISHED" or grade:
                     rres = requests.get(f"{base}/results?host={host}", headers=UA, timeout=DEFAULT_TIMEOUT)
                     if rres.ok:
                         out["tests"] = rres.json()
@@ -329,7 +328,7 @@ def cors_tests(url: str, test_origin: str = "https://example.com") -> Dict:
         results["simple"] = {"status": "request failed"}
     return results
 
-# ----------------- Redirect chain (local) + optional external
+# ----------------- Redirect chain (local)
 def redirect_chain(url: str) -> List[Dict[str, Any]]:
     """
     Follow redirects locally and return the hop chain.
@@ -363,7 +362,6 @@ def analyze_cookies_from_headers(set_cookie_header: str) -> List[Dict[str, Any]]
     # naive split on comma may break if Expires contains commas; split on set-cookie delimiters via '\n' fallback
     parts = [p.strip() for p in set_cookie_header.replace("\r", "\n").split("\n") if p.strip()]
     for raw in parts:
-        # each raw may still contain multiple cookies; split conservatively
         segs = [raw]
         for seg in segs:
             attrs = seg.split(";")
@@ -419,9 +417,17 @@ def correlate_csp(csper: Dict, observatory: Dict, local_summary: str, central: D
     """
     Merge CSP observations into a unified summary.
     """
+    # try to pull a grade from observatory (handles both 'scan' and nested 'scan.scan' forms)
+    obs_grade = None
+    try:
+        obs_grade = (observatory.get("scan") or {}).get("grade") \
+            or ((observatory.get("scan") or {}).get("scan") or {}).get("grade")
+    except Exception:
+        obs_grade = None
+
     summary: Dict[str, Any] = {
         "csper": csper if csper else {},
-        "observatory_grade": (observatory.get("scan", {}) or {}).get("scan", {}).get("grade") or (observatory.get("scan", {}) or {}).get("grade"),
+        "observatory_grade": obs_grade,
         "observatory_tests": observatory.get("tests", {}),
         "local": local_summary,
         "centralcsp": central if central else {},
@@ -433,14 +439,28 @@ def correlate_csp(csper: Dict, observatory: Dict, local_summary: str, central: D
         flags.append("local-weak")
     try:
         if csper and isinstance(csper.get("Results"), list):
-            # If Csper flags exist
             if any(item.get("Severity", "").lower() == "high" for item in csper["Results"]):
                 flags.append("csper-high")
     except Exception:
         pass
-    grade = summary["observatory_grade"]
-    if isinstance(grade, str) and grade.startswith(("D", "E", "F")):
+    if isinstance(obs_grade, str) and obs_grade[:1] in ("D", "E", "F"):
         flags.append("obs-low-grade")
     summary["overall"] = "Needs hardening" if flags else "Looks reasonable (verify details)"
     return summary
-``
+
+
+# Explicit exports so star/tuple imports don’t miss anything
+__all__ = [
+    # core tests
+    "test_sqli", "test_xss", "test_form",
+    # analyzers
+    "headers_analyzer", "csp_evaluator",
+    # graphql/openapi
+    "graphql_probe", "openapi_fetch_and_lint",
+    # new integrations
+    "csper_evaluate_url", "mozilla_observatory_scan", "centralcsp_scan",
+    "securityheaders_scan", "ssllabs_scan",
+    # local tests
+    "cors_tests", "redirect_chain", "analyze_cookies_from_headers",
+    "find_mixed_content", "correlate_csp",
+]
