@@ -1,233 +1,228 @@
+# crawler.py
+import json
+import re
+from collections import deque
+from typing import Dict, List, Set, Tuple
+from urllib.parse import urljoin, urlparse
+
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse
-import re
-import time
 
-class SecurityCrawler:
+DEFAULT_TIMEOUT = 8
+UA = {"User-Agent": "AI-Security-Scanner/2.0 (+local)"}
 
-    def __init__(self, base_url, max_pages=200):
-        self.base_url = base_url
-        self.visited = set()
-        self.to_visit = [base_url]
-        self.session = requests.Session()
-        self.max_pages = max_pages
+def same_origin(a: str, b: str) -> bool:
+    try:
+        pa, pb = urlparse(a), urlparse(b)
+        def _port(p): return p.port or (443 if p.scheme == "https" else 80)
+        return (pa.scheme, pa.hostname, _port(pa)) == (pb.scheme, pb.hostname, _port(pb))
+    except Exception:
+        return False
 
-        self.login_pages = []
-        self.forms = []
-        self.potential_vulns = []
+def _get(url: str, allow_redirects: bool = True):
+    try:
+        return requests.get(url, headers=UA, timeout=DEFAULT_TIMEOUT, allow_redirects=allow_redirects)
+    except Exception:
+        return None
 
-    # -------------------------
-    # Basic Request
-    # -------------------------
-    def fetch(self, url):
+def _safe_add(url: str, base: str, queue: deque, seen: Set[str]):
+    if not url:
+        return
+    full = urljoin(base, url)
+    if full not in seen and full.startswith(base):
+        queue.append(full)
+
+def parse_forms(soup: BeautifulSoup, page_url: str) -> List[Dict]:
+    forms = []
+    try:
+        for form in soup.find_all("form"):
+            method = (form.get("method") or "get").lower()
+            action = form.get("action") or page_url
+            inputs = [inp.get("name") for inp in form.find_all("input") if inp.get("name")]
+            forms.append({"page": page_url, "method": method, "action": urljoin(page_url, action), "inputs": inputs})
+    except Exception:
+        pass
+    return forms
+
+def robots_and_sitemap_seeds(root: str) -> Tuple[List[str], List[str]]:
+    seeds, site_urls = [], []
+    r = _get(urljoin(root, "/robots.txt"))
+    if r and r.ok:
+        for line in r.text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.lower().startswith("disallow:"):
+                path = line.split(":", 1)[1].strip()
+                if path:
+                    seeds.append(urljoin(root, path))
+            if line.lower().startswith("sitemap:"):
+                site_urls.append(line.split(":", 1)[1].strip())
+    if not site_urls:
+        site_urls = [urljoin(root, "/sitemap.xml")]
+    for sm in site_urls:
+        resp = _get(sm)
+        if resp and resp.ok:
+            try:
+                soup = BeautifulSoup(resp.text, "xml")
+                for loc in soup.find_all("loc"):
+                    loc_url = (loc.text or "").strip()
+                    if loc_url:
+                        seeds.append(loc_url)
+            except Exception:
+                pass
+    return list(set(seeds)), site_urls
+
+def historical_urls_via_wayback(root: str, limit: int = 50) -> List[str]:
+    try:
+        host = urlparse(root).netloc
+        api = f"http://web.archive.org/cdx/search/cdx?url={host}/*&output=json&limit={limit}"
+        resp = _get(api)
+        results = []
+        if resp and resp.ok:
+            data = json.loads(resp.text)
+            for row in data[1:]:  # first row is header
+                orig = row[2]
+                if orig.startswith(("http://", "https://")):
+                    scheme = urlparse(root).scheme or "https"
+                    results.append(orig.replace("http://", scheme + "://", 1))
+        return list(set(results))
+    except Exception:
+        return []
+
+def subdomains_via_crtsh(root: str, limit: int = 50) -> List[str]:
+    try:
+        parsed = urlparse(root)
+        apex = parsed.hostname
+        if not apex:
+            return []
+        q = f"https://crt.sh/?q=%25.{apex}&output=json"
+        resp = _get(q)
+        subs = set()
+        if resp and resp.ok:
+            try:
+                data = json.loads(resp.text)
+            except Exception:
+                text = "[" + resp.text.replace("}{", "},{") + "]"
+                data = json.loads(text)
+            for item in data[:limit]:
+                name = item.get("name_value", "")
+                for host in name.split("\n"):
+                    host = host.strip()
+                    if host and host.endswith(apex):
+                        scheme = parsed.scheme or "https"
+                        subs.add(f"{scheme}://{host}")
+        return list(subs)
+    except Exception:
+        return []
+
+def guess_openapi_paths(root: str) -> List[str]:
+    candidates = [
+        "/openapi.json", "/swagger.json", "/swagger/v1/swagger.json",
+        "/v3/api-docs", "/api-docs", "/api/openapi.json"
+    ]
+    found = []
+    for p in candidates:
+        resp = _get(urljoin(root, p))
+        if resp and resp.ok and (resp.headers.get("content-type", "").lower().startswith("application/json") or resp.text.strip().startswith("{")):
+            found.append(urljoin(root, p))
+    return found
+
+def guess_graphql_endpoints(root: str) -> List[str]:
+    candidates = ["/graphql", "/api", "/api/graphql", "/graphql/api"]
+    found = []
+    for p in candidates:
+        url = urljoin(root, p)
         try:
-            response = self.session.get(url, timeout=10, allow_redirects=True)
-            return response
+            jr = requests.post(url, json={"query": "query{__typename}"}, headers=UA, timeout=DEFAULT_TIMEOUT)
+            if jr.status_code in (200, 400) and ("__typename" in (jr.text or "")):
+                found.append(url)
         except Exception:
-            return None
-
-    # -------------------------
-    # Detect Login Pages
-    # -------------------------
-    def detect_login(self, soup, url):
-        forms = soup.find_all("form")
-
-        for form in forms:
-            inputs = form.find_all("input")
-
-            password_fields = [
-                i for i in inputs if i.get("type") == "password"
-            ]
-
-            if password_fields:
-                self.login_pages.append(url)
-                print(f"[+] Login page detected: {url}")
-                return True
-
-        return False
-
-    # -------------------------
-    # Extract Forms
-    # -------------------------
-    def extract_forms(self, soup, url):
-
-        forms = soup.find_all("form")
-
-        for form in forms:
-            form_data = {
-                "url": url,
-                "action": form.get("action"),
-                "method": form.get("method", "get").lower(),
-                "inputs": []
-            }
-
-            for input_tag in form.find_all("input"):
-                form_data["inputs"].append({
-                    "name": input_tag.get("name"),
-                    "type": input_tag.get("type"),
-                })
-
-            self.forms.append(form_data)
-
-    # -------------------------
-    # Check CSRF Protection
-    # -------------------------
-    def check_csrf(self, form):
-
-        token_patterns = [
-            "csrf",
-            "token",
-            "authenticity_token"
-        ]
-
-        for input_field in form["inputs"]:
-            name = input_field["name"]
-
-            if name:
-                for token in token_patterns:
-                    if token in name.lower():
-                        return True
-
-        return False
-
-    # -------------------------
-    # Test Access Control
-    # -------------------------
-    def check_direct_access(self, url):
-
-        r = self.session.get(url)
-
-        if r.status_code == 200:
-            if "login" not in r.url.lower():
-                self.potential_vulns.append({
-                    "type": "Access Control Bypass",
-                    "url": url
-                })
-                print(f"[!] Possible access control bypass: {url}")
-
-    # -------------------------
-    # Identify Brute Force Risk
-    # -------------------------
-    def check_bruteforce_risk(self, form):
-
-        password_fields = [
-            f for f in form["inputs"] if f["type"] == "password"
-        ]
-
-        if password_fields:
-
-            if not self.check_csrf(form):
-
-                self.potential_vulns.append({
-                    "type": "Possible Brute Force Risk",
-                    "url": form["url"]
-                })
-
-                print(f"[!] Possible brute force risk: {form['url']}")
-
-    # -------------------------
-    # Extract Links
-    # -------------------------
-    def extract_links(self, soup, url):
-
-        links = set()
-
-        for a in soup.find_all("a", href=True):
-
-            link = urljoin(url, a["href"])
-
-            if urlparse(link).netloc == urlparse(self.base_url).netloc:
-                links.add(link)
-
-        return links
-
-    # -------------------------
-    # Crawl
-    # -------------------------
-    def crawl(self):
-
-        while self.to_visit and len(self.visited) < self.max_pages:
-
-            url = self.to_visit.pop(0)
-
-            if url in self.visited:
-                continue
-
-            print(f"[+] Crawling: {url}")
-
-            response = self.fetch(url)
-
-            if not response or "text/html" not in response.headers.get("Content-Type",""):
-                continue
-
-            self.visited.add(url)
-
-            soup = BeautifulSoup(response.text, "html.parser")
-
-            self.detect_login(soup, url)
-
-            self.extract_forms(soup, url)
-
-            self.check_direct_access(url)
-
-            links = self.extract_links(soup, url)
-
-            for link in links:
-                if link not in self.visited:
-                    self.to_visit.append(link)
-
-            time.sleep(0.5)
-
-        self.analyze_forms()
-
-    # -------------------------
-    # Analyze Forms
-    # -------------------------
-    def analyze_forms(self):
-
-        print("\n[+] Analyzing Forms")
-
-        for form in self.forms:
-
-            if not self.check_csrf(form):
-
-                self.potential_vulns.append({
-                    "type": "Missing CSRF Token",
-                    "url": form["url"]
-                })
-
-                print(f"[!] Missing CSRF protection: {form['url']}")
-
-            self.check_bruteforce_risk(form)
-
-    # -------------------------
-    # Report
-    # -------------------------
-    def report(self):
-
-        print("\n========== Scan Report ==========")
-
-        print(f"Pages Crawled: {len(self.visited)}")
-        print(f"Login Pages Found: {len(self.login_pages)}")
-
-        for login in self.login_pages:
-            print(f"  - {login}")
-
-        print("\nPotential Vulnerabilities:")
-
-        for v in self.potential_vulns:
-            print(f"[{v['type']}] -> {v['url']}")
-
-        print("=================================")
-
-
-if __name__ == "__main__":
-
-    target = input("Enter target URL: ")
-
-    crawler = SecurityCrawler(target)
-
-    crawler.crawl()
-
-    crawler.report()
+            pass
+    return list(set(found))
+
+def extract_js_libs_and_links(soup: BeautifulSoup) -> Dict:
+    libs = []
+    links = []
+    try:
+        for s in soup.find_all("script", src=True):
+            src = s.get("src") or ""
+            links.append(src)
+            m = re.search(r"/?([a-z0-9\.\-_]+?)-(\d+\.\d+(?:\.\d+)?)(?:\.min)?\.js", src, flags=re.I)
+            if m:
+                libs.append({"name": m.group(1).lower(), "version": m.group(2), "src": src})
+    except Exception:
+        pass
+    return {"libs": libs, "links": links}
+
+def crawl(root: str) -> Tuple[List[str], List[Dict], Dict]:
+    """
+    Crawl website and perform discovery (robots, sitemap, Wayback, crt.sh, OpenAPI, GraphQL).
+    Returns:
+        visited_urls: list of page URLs (same-origin)
+        forms: list of forms with method/action/input names
+        discovery: dict with seeds, historical, subdomains, openapi_docs, graphql_endpoints, js_libs (unique list)
+    """
+    root = root.rstrip("/")
+    visited: List[str] = []
+    forms: List[Dict] = []
+    js_libs_unique: Dict[str, Dict] = {}
+
+    # Discovery seeds
+    robot_seeds, sitemaps = robots_and_sitemap_seeds(root)
+    wayback = historical_urls_via_wayback(root, limit=50)
+    crt = subdomains_via_crtsh(root, limit=50)
+    openapi_docs = guess_openapi_paths(root)
+    graphql_eps = guess_graphql_endpoints(root)
+
+    queue: deque = deque()
+    seen: Set[str] = set()
+
+    for s in set(robot_seeds + wayback + [root]):
+        if s.startswith(root):
+            queue.append(s)
+
+    # BFS crawl (same-origin)
+    while queue and len(visited) < 250:  # cap for safety
+        current = queue.popleft()
+        if current in seen:
+            continue
+        seen.add(current)
+
+        resp = _get(current)
+        if not (resp and resp.ok):
+            continue
+
+        visited.append(current)
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        # Links
+        try:
+            for a in soup.find_all("a", href=True):
+                full = urljoin(current, a.get("href"))
+                if same_origin(full, root) and full not in seen:
+                    queue.append(full)
+        except Exception:
+            pass
+
+        # Forms
+        forms.extend(parse_forms(soup, current))
+
+        # JS libs (aggregate unique)
+        js = extract_js_libs_and_links(soup)
+        for lib in js["libs"]:
+            key = f"{lib['name']}@{lib['version']}"
+            if key not in js_libs_unique:
+                js_libs_unique[key] = lib
+
+    discovery = {
+        "robots_seeds": robot_seeds,
+        "sitemaps": sitemaps,
+        "historical_urls": wayback,
+        "subdomains": crt,
+        "openapi_docs": openapi_docs,
+        "graphql_endpoints": graphql_eps,
+        "js_libs": list(js_libs_unique.values())
+    }
+    return visited, forms, discovery
+``
