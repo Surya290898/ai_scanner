@@ -1,8 +1,9 @@
 # crawler.py
 import json
+import os
 import re
 from collections import deque
-from typing import Dict, List, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple, Union
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -81,7 +82,7 @@ def historical_urls_via_wayback(root: str, limit: int = 50) -> List[str]:
         results = []
         if resp and resp.ok:
             data = json.loads(resp.text)
-            for row in data[1:]:  # first row is header
+            for row in data[1:]:
                 orig = row[2]
                 if orig.startswith(("http://", "https://")):
                     scheme = urlparse(root).scheme or "https"
@@ -156,19 +157,11 @@ def extract_js_libs_and_links(soup: BeautifulSoup) -> Dict:
     return {"libs": libs, "links": links}
 
 def crawl(root: str) -> Tuple[List[str], List[Dict], Dict]:
-    """
-    Crawl website and perform discovery (robots, sitemap, Wayback, crt.sh, OpenAPI, GraphQL).
-    Returns:
-        visited_urls: list of page URLs (same-origin)
-        forms: list of forms with method/action/input names
-        discovery: dict with seeds, historical, subdomains, openapi_docs, graphql_endpoints, js_libs (unique list)
-    """
     root = root.rstrip("/")
     visited: List[str] = []
     forms: List[Dict] = []
     js_libs_unique: Dict[str, Dict] = {}
 
-    # Discovery seeds
     robot_seeds, sitemaps = robots_and_sitemap_seeds(root)
     wayback = historical_urls_via_wayback(root, limit=50)
     crt = subdomains_via_crtsh(root, limit=50)
@@ -182,8 +175,7 @@ def crawl(root: str) -> Tuple[List[str], List[Dict], Dict]:
         if s.startswith(root):
             queue.append(s)
 
-    # BFS crawl (same-origin)
-    while queue and len(visited) < 250:  # cap for safety
+    while queue and len(visited) < 250:
         current = queue.popleft()
         if current in seen:
             continue
@@ -196,7 +188,6 @@ def crawl(root: str) -> Tuple[List[str], List[Dict], Dict]:
         visited.append(current)
         soup = BeautifulSoup(resp.text, "html.parser")
 
-        # Links
         try:
             for a in soup.find_all("a", href=True):
                 full = urljoin(current, a.get("href"))
@@ -205,10 +196,8 @@ def crawl(root: str) -> Tuple[List[str], List[Dict], Dict]:
         except Exception:
             pass
 
-        # Forms
         forms.extend(parse_forms(soup, current))
 
-        # JS libs (aggregate unique)
         js = extract_js_libs_and_links(soup)
         for lib in js["libs"]:
             key = f"{lib['name']}@{lib['version']}"
@@ -225,4 +214,3 @@ def crawl(root: str) -> Tuple[List[str], List[Dict], Dict]:
         "js_libs": list(js_libs_unique.values())
     }
     return visited, forms, discovery
-``
