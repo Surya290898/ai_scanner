@@ -10,10 +10,10 @@ import requests
 from bs4 import BeautifulSoup
 
 DEFAULT_TIMEOUT = 12
-UA = {"User-Agent": "AI-Security-Scanner/2.1 (+local)"}
+UA = {"User-Agent": "AI-Security-Scanner/2.2 (+local)"}
 
 # ----------------------------
-# Core simple tests (existing)
+# Classic simple tests
 # ----------------------------
 def test_sqli(url: str) -> bool:
     payload = "' OR '1'='1"
@@ -66,7 +66,7 @@ def test_form(form: Dict) -> Dict:
     return results
 
 # ----------------------------
-# Header analyzers (existing)
+# Header analyzers
 # ----------------------------
 def csp_evaluator(csp_header: str) -> str:
     if not csp_header:
@@ -107,7 +107,7 @@ def headers_analyzer(url: str) -> Dict:
     return out
 
 # ----------------------------
-# GraphQL / OpenAPI (existing)
+# GraphQL / OpenAPI
 # ----------------------------
 def graphql_probe(endpoint: str) -> Dict:
     result = {"endpoint": endpoint, "introspection": "Unknown"}
@@ -155,227 +155,8 @@ def openapi_fetch_and_lint(url: str) -> Dict:
         pass
     return res
 
-# =====================================================================
-# NEW: Safe Authentication Surface Checks (non-intrusive)
-# =====================================================================
-
-CSRF_CANDIDATE_NAMES = [
-    "csrf", "csrf-token", "csrf_token", "authenticity_token",
-    "__requestverificationtoken", "__csrf", "_csrf", "xsrf-token", "x-csrf-token"
-]
-
-def _fetch(session: requests.Session, url: str) -> Optional[requests.Response]:
-    try:
-        return session.get(url, headers=UA, timeout=DEFAULT_TIMEOUT)
-    except Exception:
-        return None
-
-def _post(session: requests.Session, url: str, data: Dict[str, str], referer: Optional[str] = None) -> Optional[requests.Response]:
-    try:
-        h = {**UA}
-        if referer:
-            h["Referer"] = referer
-        return session.post(url, data=data, headers=h, timeout=DEFAULT_TIMEOUT, allow_redirects=True)
-    except Exception:
-        return None
-
-def _find_password_forms(html: str, base_url: str) -> List[Dict[str, Any]]:
-    out = []
-    soup = BeautifulSoup(html or "", "html.parser")
-    for form in soup.find_all("form"):
-        method = (form.get("method") or "get").lower()
-        action = urljoin(base_url, form.get("action") or base_url)
-        inputs = []
-        has_pwd = False
-        csrf_present = False
-        for inp in form.find_all("input"):
-            name = inp.get("name")
-            itype = (inp.get("type") or "").lower()
-            if name:
-                inputs.append({"name": name, "type": itype, "value": inp.get("value") or ""})
-            if itype == "password":
-                has_pwd = True
-            if itype == "hidden":
-                nm = (name or "").lower()
-                if any(c in nm for c in CSRF_CANDIDATE_NAMES):
-                    csrf_present = True
-        # meta csrf?
-        for meta in soup.find_all("meta"):
-            nm = (meta.get("name") or "").lower()
-            if any(c == nm for c in CSRF_CANDIDATE_NAMES):
-                csrf_present = True
-        if has_pwd:
-            out.append({
-                "method": method,
-                "action": action,
-                "inputs": inputs,
-                "csrf_token_present": csrf_present
-            })
-    return out
-
-def _has_loginish_url(u: str) -> bool:
-    u = (u or "").lower()
-    return any(x in u for x in ("/login", "/signin", "/account/login", "/users/sign_in", "/auth/login"))
-
-def _random_email(domain_hint: str = "example.com") -> str:
-    left = "".join(random.choices(string.ascii_lowercase, k=8))
-    return f"{left}@{domain_hint}"
-
-def _username_enum_hint(res_a: requests.Response, res_b: requests.Response) -> Optional[str]:
-    """
-    Heuristic: if content length differs significantly for two invalid users,
-    this may hint username enumeration via error messages. Non-binding.
-    """
-    try:
-        a = res_a.text or ""
-        b = res_b.text or ""
-        if abs(len(a) - len(b)) > 100:
-            return "Different error sizes for distinct fake usernames (possible username enumeration hint)."
-    except Exception:
-        pass
-    return None
-
-def auth_surface_checks(root: str, pages: List[str], max_attempts_per_login: int = 3) -> Dict[str, Any]:
-    """
-    Non-intrusive authentication posture assessment:
-      - Map login forms
-      - Check HTTPS & POST usage
-      - Detect CSRF token presence
-      - Evaluate session cookie flags via response headers
-      - Small, capped failed attempts (<=3) to observe lockout/rate-limit/captcha signals
-      - Optional username-enumeration hint via message size delta
-    Never performs brute-force or large-scale guessing.
-    """
-    session = requests.Session()
-    session.headers.update(UA)
-
-    candidates = []
-    for p in pages:
-        if _has_loginish_url(p):
-            candidates.append(p)
-    # Also test root for links to login
-    if root not in candidates:
-        candidates = [root] + candidates
-    candidates = list(dict.fromkeys(candidates))[:20]  # cap
-
-    findings: List[Dict[str, Any]] = []
-    for page in candidates:
-        r = _fetch(session, page)
-        if not (r and r.ok):
-            continue
-        pwd_forms = _find_password_forms(r.text, page)
-        # record cookie attributes (high level)
-        set_cookie = r.headers.get("Set-Cookie", "")
-        cookie_issues = []
-        if set_cookie:
-            lower = set_cookie.lower()
-            if "secure" not in lower:
-                cookie_issues.append("Missing Secure on Set-Cookie")
-            if "httponly" not in lower:
-                cookie_issues.append("Missing HttpOnly on Set-Cookie")
-            if "samesite" not in lower:
-                cookie_issues.append("Missing SameSite on Set-Cookie")
-
-        for f in pwd_forms:
-            issues = []
-            # HTTPS & method
-            if not f["action"].startswith("https://") or not page.startswith("https://"):
-                issues.append("Login form/page not fully over HTTPS")
-            if f["method"] != "post":
-                issues.append("Login form uses GET instead of POST")
-            if not f["csrf_token_present"]:
-                issues.append("No obvious anti-CSRF token in form or meta")
-
-            # small, capped failed attempts for signals (not brute-force)
-            lockout_signal = None
-            enum_hint = None
-            try:
-                action = f["action"]
-                # pick username and password field names (best-effort)
-                uname_field = None
-                pass_field = None
-                for i in f["inputs"]:
-                    t = (i.get("type") or "").lower()
-                    n = (i.get("name") or "").lower()
-                    if t == "password" and not pass_field:
-                        pass_field = i["name"]
-                    if n in ("username", "email", "user", "login", "user[email]", "user[login]") and not uname_field:
-                        uname_field = i["name"]
-                # if we couldn't detect required fields, skip active checks
-                if uname_field and pass_field:
-                    # prepare 2 distinct fake usernames for enum hint
-                    domain_hint = urlparse(root).hostname or "example.com"
-                    u1 = _random_email(domain_hint)
-                    u2 = _random_email(domain_hint)
-                    payload_base = {}
-                    for i in f["inputs"]:
-                        # keep other hidden/default inputs (e.g., CSRF) as-is
-                        if i["name"] not in (uname_field, pass_field):
-                            payload_base[i["name"]] = i.get("value") or ""
-
-                    # attempt #1
-                    data1 = dict(payload_base)
-                    data1[uname_field] = u1
-                    data1[pass_field]  = "Wrong#12345"
-                    res1 = _post(session, action, data1, referer=page)
-
-                    time.sleep(0.8)
-
-                    # attempt #2
-                    data2 = dict(payload_base)
-                    data2[uname_field] = u2
-                    data2[pass_field]  = "Wrong#12345"
-                    res2 = _post(session, action, data2, referer=page)
-
-                    # cap attempts: third only if we saw explicit signals missing
-                    res3 = None
-                    if max_attempts_per_login >= 3:
-                        time.sleep(0.8)
-                        data3 = dict(payload_base)
-                        data3[uname_field] = u2
-                        data3[pass_field]  = "Wrong#12345"
-                        res3 = _post(session, action, data3, referer=page)
-
-                    # look for basic lockout/rate-limit cues
-                    for rr in [res1, res2, res3]:
-                        if not rr:
-                            continue
-                        txt = (rr.text or "").lower()
-                        if any(s in txt for s in ["too many attempts", "locked", "try again later", "captcha"]):
-                            lockout_signal = "Lockout/CAPTCHA message visible after few failed attempts"
-                            break
-                        if rr.headers.get("Retry-After") or rr.headers.get("X-RateLimit-Remaining"):
-                            lockout_signal = "Rate-limiting headers present after failed attempts"
-                            break
-
-                    # username-enumeration hint
-                    if res1 and res2:
-                        enum_hint = _username_enum_hint(res1, res2)
-            except Exception:
-                pass
-
-            details = {
-                "login_page": page,
-                "action": f["action"],
-                "method": f["method"],
-                "csrf_token_present": f["csrf_token_present"],
-                "cookie_issues": cookie_issues,
-                "issues": issues,
-                "signals": {
-                    "lockout_or_rate_limit": lockout_signal,
-                    "username_enumeration_hint": enum_hint
-                }
-            }
-            findings.append(details)
-
-    return {
-        "root": root,
-        "logins_assessed": len(findings),
-        "findings": findings
-    }
-
 # ----------------------------
-# Other utilities (existing)
+# CORS / Redirect / Cookie / Mixed
 # ----------------------------
 def cors_tests(url: str, test_origin: str = "https://example.com") -> Dict:
     results = {"preflight": {}, "simple": {}}
@@ -466,41 +247,412 @@ def find_mixed_content(html: str) -> List[str]:
             idx = j + len(m)
     return out
 
-def correlate_csp(csper: Dict, observatory: Dict, local_summary: str, central: Dict) -> Dict:
-    obs_grade = None
-    try:
-        obs_grade = (observatory.get("scan") or {}).get("grade") \
-            or ((observatory.get("scan") or {}).get("scan") or {}).get("grade")
-    except Exception:
-        obs_grade = None
+# =====================================================================
+# NEW: Authentication Security Auditor (safe mode)
+# =====================================================================
 
-    summary: Dict[str, Any] = {
-        "csper": csper if csper else {},
-        "observatory_grade": obs_grade,
-        "observatory_tests": observatory.get("tests", {}),
-        "local": local_summary,
-        "centralcsp": central if central else {},
-        "overall": "See sources"
-    }
-    flags = []
-    if isinstance(local_summary, str) and local_summary.startswith("Weak CSP"):
-        flags.append("local-weak")
+CSRF_CANDIDATE_NAMES = [
+    "csrf", "csrf-token", "csrf_token", "authenticity_token",
+    "__requestverificationtoken", "__csrf", "_csrf", "xsrf-token", "x-csrf-token"
+]
+
+LOGIN_HINT_WORDS = [
+    "/login", "/signin", "/account/login", "/users/sign_in", "/auth/login"
+]
+
+SENSITIVE_ENDPOINTS = [
+    "/admin", "/admin/login", "/manage", "/manager", "/console",
+    "/actuator", "/debug", "/phpmyadmin", "/_profiler", "/wp-admin", "/umbraco"
+]
+
+API_CANDIDATES = [
+    "/api", "/api/v1", "/api/v2", "/v1", "/v2"
+]
+
+def _fetch(session: requests.Session, url: str) -> Optional[requests.Response]:
     try:
-        if csper and isinstance(csper.get("Results"), list):
-            if any(item.get("Severity", "").lower() == "high" for item in csper["Results"]):
-                flags.append("csper-high")
+        return session.get(url, headers=UA, timeout=DEFAULT_TIMEOUT)
+    except Exception:
+        return None
+
+def _post(session: requests.Session, url: str, data: Dict[str, str], referer: Optional[str] = None) -> Optional[requests.Response]:
+    try:
+        h = {**UA}
+        if referer:
+            h["Referer"] = referer
+        return session.post(url, data=data, headers=h, timeout=DEFAULT_TIMEOUT, allow_redirects=True)
+    except Exception:
+        return None
+
+def _random_email(domain_hint: str = "example.com") -> str:
+    left = "".join(random.choices(string.ascii_lowercase, k=8))
+    return f"{left}@{domain_hint}"
+
+def _username_enum_hint(res_a: requests.Response, res_b: requests.Response) -> Optional[str]:
+    try:
+        a = res_a.text or ""
+        b = res_b.text or ""
+        if abs(len(a) - len(b)) > 100:
+            return "Different error sizes for distinct fake usernames (possible username enumeration hint)."
     except Exception:
         pass
-    if isinstance(obs_grade, str) and obs_grade[:1] in ("D", "E", "F"):
-        flags.append("obs-low-grade")
-    summary["overall"] = "Needs hardening" if flags else "Looks reasonable (verify details)"
-    return summary
+    return None
+
+def _has_loginish_url(u: str) -> bool:
+    u = (u or "").lower()
+    return any(x in u for x in LOGIN_HINT_WORDS)
+
+def _detect_login_forms(html: str, base_url: str) -> List[Dict[str, Any]]:
+    out = []
+    soup = BeautifulSoup(html or "", "html.parser")
+    meta_csrf = False
+    for meta in soup.find_all("meta"):
+        nm = (meta.get("name") or "").lower()
+        if any(c == nm for c in CSRF_CANDIDATE_NAMES):
+            meta_csrf = True
+            break
+
+    for form in soup.find_all("form"):
+        method = (form.get("method") or "get").lower()
+        action = urljoin(base_url, form.get("action") or base_url)
+        inputs, has_pwd, csrf_present = [], False, meta_csrf
+        for inp in form.find_all("input"):
+            name = inp.get("name")
+            itype = (inp.get("type") or "").lower()
+            if name:
+                inputs.append({"name": name, "type": itype, "value": inp.get("value") or ""})
+            if itype == "password":
+                has_pwd = True
+            if itype == "hidden":
+                nm = (name or "").lower()
+                if any(c in nm for c in CSRF_CANDIDATE_NAMES):
+                    csrf_present = True
+        if has_pwd:
+            out.append({
+                "method": method,
+                "action": action,
+                "inputs": inputs,
+                "csrf_token_present": csrf_present
+            })
+    return out
+
+def _mfa_hints(html: str) -> Optional[str]:
+    t = (html or "").lower()
+    if any(k in t for k in ["2fa", "two factor", "two-factor", "one-time", "otp", "authenticator app", "totp"]):
+        return "MFA references detected (2FA/OTP)."
+    return None
+
+def _password_policy_hints(html: str) -> List[str]:
+    hints = []
+    soup = BeautifulSoup(html or "", "html.parser")
+    for inp in soup.find_all("input"):
+        itype = (inp.get("type") or "").lower()
+        if itype == "password":
+            if inp.get("minlength"):
+                hints.append(f"Password minlength client-side: {inp.get('minlength')}")
+            if inp.get("pattern"):
+                hints.append("Password pattern enforced client-side.")
+    text = (html or "").lower()
+    if any(k in text for k in ["minimum", "uppercase", "lowercase", "special character", "length"]):
+        hints.append("Password policy hints present in page text.")
+    return hints
+
+def _logout_csrf_hints(html: str, base_url: str) -> Optional[str]:
+    soup = BeautifulSoup(html or "", "html.parser")
+    # look for logout links/forms
+    for a in soup.find_all("a", href=True):
+        if "logout" in (a.get("href") or "").lower():
+            href = urljoin(base_url, a["href"])
+            if href.startswith("http") and (href.startswith("http://") or href.startswith("https://")):
+                # anchor logout via GET -> likely CSRF-prone unless SameSite strict everywhere
+                return "Logout appears to use GET (consider POST + CSRF)."
+    for form in soup.find_all("form"):
+        act = (form.get("action") or "").lower()
+        if "logout" in act and (form.get("method") or "get").lower() != "post":
+            return "Logout form not using POST."
+    return None
+
+def _session_cookie_signals(headers: Dict[str, str]) -> List[str]:
+    issues = []
+    set_cookie = (headers or {}).get("Set-Cookie", "")
+    if not set_cookie:
+        return issues
+    low = set_cookie.lower()
+    if "secure" not in low:    issues.append("Set-Cookie missing Secure")
+    if "httponly" not in low:  issues.append("Set-Cookie missing HttpOnly")
+    if "samesite" not in low:  issues.append("Set-Cookie missing SameSite")
+    return issues
+
+def _rate_limit_lockout_signals(responses: List[Optional[requests.Response]]) -> Optional[str]:
+    for rr in responses:
+        if not rr:
+            continue
+        txt = (rr.text or "").lower()
+        if any(s in txt for s in ["too many attempts", "locked", "try again later", "captcha"]):
+            return "Lockout/CAPTCHA message visible after few failed attempts"
+        if rr.headers.get("Retry-After") or rr.headers.get("X-RateLimit-Remaining"):
+            return "Rate-limiting headers present after failed attempts"
+    return None
+
+def _extract_un_pw_fields(inputs: List[Dict[str, Any]]) -> Tuple[Optional[str], Optional[str]]:
+    uname_field = None
+    pass_field = None
+    for i in inputs:
+        t = (i.get("type") or "").lower()
+        n = (i.get("name") or "").lower()
+        if t == "password" and not pass_field:
+            pass_field = i["name"]
+        if n in ("username", "email", "user", "login", "user[email]", "user[login]") and not uname_field:
+            uname_field = i["name"]
+    return uname_field, pass_field
+
+def _visible_text_hints(html: str) -> List[str]:
+    out = []
+    low = (html or "").lower()
+    if "remember me" in low:
+        out.append("Remember-me option visible")
+    if "show password" in low or "toggle password" in low:
+        out.append("Show password toggle present")
+    return out
+
+def _guess_api_endpoints(root: str, pages: List[str]) -> List[str]:
+    # known pages with /api in path + a few candidates relative to root
+    candidates = set()
+    for p in pages:
+        if "/api" in p:
+            candidates.add(p)
+    for suffix in API_CANDIDATES:
+        candidates.add(urljoin(root, suffix))
+    return list(candidates)[:15]
+
+def _evaluate_api_auth(root: str, pages: List[str]) -> List[Dict[str, Any]]:
+    """
+    Very light probes: GET and OPTIONS with Origin to look for permissive CORS or unauthenticated 200 JSON.
+    """
+    session = requests.Session()
+    session.headers.update(UA)
+    out = []
+    for ep in _guess_api_endpoints(root, pages):
+        try:
+            g = session.get(ep, timeout=DEFAULT_TIMEOUT, headers=UA)
+            api_item = {"endpoint": ep, "status": getattr(g, "status_code", "n/a"), "notes": []}
+            ct = (g.headers.get("Content-Type") or "").lower()
+            if g.status_code == 200 and ("application/json" in ct or g.text.strip().startswith(("{", "["))):
+                api_item["notes"].append("Endpoint returns JSON with no auth (verify intended public access)")
+            # CORS preflight
+            try:
+                h = {"Origin": "https://example.com", "Access-Control-Request-Method": "GET", **UA}
+                o = session.options(ep, headers=h, timeout=DEFAULT_TIMEOUT)
+                acao = o.headers.get("Access-Control-Allow-Origin", "")
+                acac = (o.headers.get("Access-Control-Allow-Credentials", "") or "").lower()
+                if acao == "*" and acac == "true":
+                    api_item["notes"].append("CORS allows '*' with credentials (misconfiguration)")
+            except Exception:
+                pass
+            out.append(api_item)
+        except Exception:
+            pass
+    return out
+
+def _scan_sensitive_endpoints(root: str) -> List[Dict[str, Any]]:
+    session = requests.Session()
+    session.headers.update(UA)
+    out = []
+    for path in SENSITIVE_ENDPOINTS[:15]:
+        url = urljoin(root, path)
+        try:
+            r = session.get(url, timeout=DEFAULT_TIMEOUT, allow_redirects=True)
+            note = None
+            if r.status_code == 200:
+                note = "Accessible (200). If admin-only, ensure protection."
+            elif r.status_code in (401, 403):
+                note = f"Protected ({r.status_code})."
+            elif r.status_code in (301, 302):
+                note = f"Redirects ({r.status_code}) to {r.headers.get('Location', '')}"
+            else:
+                note = f"Status {r.status_code}"
+            out.append({"url": url, "status": r.status_code, "note": note})
+        except Exception:
+            pass
+    return out
+
+def _score_auth(findings: Dict[str, Any]) -> int:
+    """
+    Produce a 0-100 score from multiple categories.
+    Simple weighting to keep it explainable.
+    """
+    score = 100
+    penalties = []
+
+    # Missing CSRF/HTTPS/POST use on any login
+    for f in findings.get("logins", []):
+        if not f.get("https_ok", True): penalties.append(8)
+        if not f.get("post_ok",  True): penalties.append(6)
+        if not f.get("csrf_ok",  True): penalties.append(8)
+        for c in (f.get("cookie_issues") or []):
+            penalties.append(4)
+
+        # if username enumeration hint present
+        if f.get("signals", {}).get("username_enumeration_hint"): penalties.append(4)
+        if not f.get("signals", {}).get("lockout_or_rate_limit"): penalties.append(4)  # no visible signal
+
+    # Logout CSRF
+    if findings.get("logout_csrf_hint"): penalties.append(4)
+
+    # Weak password policy
+    if findings.get("password_policy") and not findings["password_policy"]:
+        penalties.append(0)
+    elif findings.get("password_policy"):
+        # If only minlength < 8 detected
+        for h in findings["password_policy"]:
+            if "minlength" in h:
+                try:
+                    v = int("".join([d for d in h if d.isdigit()]))
+                    if v < 8:
+                        penalties.append(4)
+                except Exception:
+                    pass
+
+    # Sensitive endpoints: accessible admin-like endpoints
+    for s in findings.get("sensitive_endpoints", []):
+        if s.get("status") == 200 and "admin" in s.get("url", "").lower():
+            penalties.append(10)
+
+    # API auth notes
+    for a in findings.get("api_auth", []):
+        for n in a.get("notes", []):
+            if "no auth" in n.lower():
+                penalties.append(6)
+            if "misconfiguration" in n.lower():
+                penalties.append(6)
+
+    # MFA absent (no hints) is not a penalty; presence earns small bonus
+    if findings.get("mfa_hint"):
+        score += 2  # small bonus
+
+    # clamp
+    total_pen = sum(penalties)
+    score = max(0, min(100, score - total_pen))
+    return score
+
+def auth_security_audit(root: str, pages: List[str]) -> Dict[str, Any]:
+    """
+    Authentication Security Auditor (safe mode)
+    - Login mapping, HTTPS/POST/CSRF check
+    - Cookie flags on login responses
+    - ≤3 benign failed attempts for lockout/rate-limit signals + username-enum hint (size delta)
+    - MFA hints, password policy hints, logout CSRF hints
+    - Sensitive endpoints quick scan
+    - API auth misconfig quick scan
+    Returns a dict with detailed findings and a 0..100 score
+    """
+    session = requests.Session()
+    session.headers.update(UA)
+
+    candidates = []
+    for p in pages:
+        if _has_loginish_url(p):
+            candidates.append(p)
+    # Always include root for nav-based login
+    if root not in candidates:
+        candidates = [root] + candidates
+    candidates = list(dict.fromkeys(candidates))[:20]
+
+    login_findings: List[Dict[str, Any]] = []
+    any_logout_hint = None
+    mfa_hint = None
+    pwd_policy_hints: List[str] = []
+    cookie_issues_aggregate: List[str] = []
+
+    for page in candidates:
+        r = _fetch(session, page)
+        if not (r and r.ok):
+            continue
+        html = r.text or ""
+        mfa_hint = mfa_hint or _mfa_hints(html)
+        li_forms = _detect_login_forms(html, page)
+        logout_hint = _logout_csrf_hints(html, page)
+        if logout_hint:
+            any_logout_hint = logout_hint
+        pwd_policy_hints.extend(_password_policy_hints(html))
+
+        # cookie flags for the page view
+        cookie_issues_aggregate.extend(_session_cookie_signals(r.headers))
+
+        for f in li_forms:
+            # HTTPS + POST + CSRF flags
+            https_ok = page.startswith("https://") and f["action"].startswith("https://")
+            post_ok  = f["method"] == "post"
+            csrf_ok  = f["csrf_token_present"]
+
+            # benign failed attempts (≤3)
+            lockout_signal = None
+            enum_hint = None
+            try:
+                uname_field, pass_field = _extract_un_pw_fields(f["inputs"])
+                if uname_field and pass_field:
+                    domain_hint = urlparse(root).hostname or "example.com"
+                    u1 = _random_email(domain_hint)
+                    u2 = _random_email(domain_hint)
+                    payload_base = {}
+                    for i in f["inputs"]:
+                        if i["name"] not in (uname_field, pass_field):
+                            payload_base[i["name"]] = i.get("value") or ""
+
+                    # attempt #1
+                    d1 = dict(payload_base); d1[uname_field] = u1; d1[pass_field] = "Wrong#12345"
+                    res1 = _post(session, f["action"], d1, referer=page); time.sleep(0.6)
+
+                    # attempt #2
+                    d2 = dict(payload_base); d2[uname_field] = u2; d2[pass_field] = "Wrong#12345"
+                    res2 = _post(session, f["action"], d2, referer=page); time.sleep(0.6)
+
+                    # attempt #3 (optional)
+                    d3 = dict(payload_base); d3[uname_field] = u2; d3[pass_field] = "Wrong#12345"
+                    res3 = _post(session, f["action"], d3, referer=page)
+
+                    lockout_signal = _rate_limit_lockout_signals([res1, res2, res3])
+                    if res1 and res2:
+                        enum_hint = _username_enum_hint(res1, res2)
+            except Exception:
+                pass
+
+            # cookie flags from response to login page already collected above
+            login_findings.append({
+                "login_page": page,
+                "action": f["action"],
+                "https_ok": https_ok,
+                "post_ok": post_ok,
+                "csrf_ok": csrf_ok,
+                "cookie_issues": list(set(cookie_issues_aggregate)),
+                "signals": {
+                    "lockout_or_rate_limit": lockout_signal,
+                    "username_enumeration_hint": enum_hint
+                },
+                "ui_hints": _visible_text_hints(html),
+            })
+
+    sensitive = _scan_sensitive_endpoints(root)
+    api_auth  = _evaluate_api_auth(root, pages)
+
+    findings = {
+        "root": root,
+        "logins": login_findings,
+        "logout_csrf_hint": any_logout_hint,
+        "mfa_hint": mfa_hint,
+        "password_policy": list(set(pwd_policy_hints)),
+        "sensitive_endpoints": sensitive,
+        "api_auth": api_auth
+    }
+    score = _score_auth(findings)
+    findings["score"] = score
+    return findings
 
 __all__ = [
     "test_sqli", "test_xss", "test_form",
     "headers_analyzer", "csp_evaluator",
     "graphql_probe", "openapi_fetch_and_lint",
-    "auth_surface_checks",  # NEW
-    "cors_tests", "redirect_chain", "analyze_cookies_from_headers",
-    "find_mixed_content", "correlate_csp",
+    "cors_tests", "redirect_chain",
+    "analyze_cookies_from_headers", "find_mixed_content",
+    "auth_security_audit",
 ]
