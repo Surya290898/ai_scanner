@@ -9,7 +9,7 @@ import requests
 from bs4 import BeautifulSoup
 
 DEFAULT_TIMEOUT = 8
-UA = {"User-Agent": "AI-Security-Scanner/1.0 (+local)"}
+UA = {"User-Agent": "AI-Security-Scanner/2.0 (+local)"}
 
 def same_origin(a: str, b: str) -> bool:
     try:
@@ -225,3 +225,4 @@ def crawl(root: str) -> Tuple[List[str], List[Dict], Dict]:
         "js_libs": list(js_libs_unique.values())
     }
     return visited, forms, discovery
+``
