@@ -1,4 +1,8 @@
 # app.py
+# --- ensure local package directory is first on sys.path
+import os, sys
+sys.path.insert(0, os.path.dirname(__file__))
+
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -10,25 +14,48 @@ from fpdf import FPDF
 
 from ai_engine import analyze_response
 from crawler import crawl
-from scanner import (
-    headers_analyzer,
-    test_sqli,
-    test_xss,
-    test_form,
-    graphql_probe,
-    openapi_fetch_and_lint,
-    # new
-    csper_evaluate_url,
-    mozilla_observatory_scan,
-    centralcsp_scan,
-    securityheaders_scan,
-    ssllabs_scan,
-    cors_tests,
-    redirect_chain,
-    analyze_cookies_from_headers,
-    find_mixed_content,
-    correlate_csp
-)
+
+# Robust import (handles stale module caches / name collisions)
+try:
+    from scanner import (
+        headers_analyzer,
+        test_sqli,
+        test_xss,
+        test_form,
+        graphql_probe,
+        openapi_fetch_and_lint,
+        # new extended checks
+        csper_evaluate_url,
+        mozilla_observatory_scan,
+        centralcsp_scan,
+        securityheaders_scan,
+        ssllabs_scan,
+        cors_tests,
+        redirect_chain,
+        analyze_cookies_from_headers,
+        find_mixed_content,
+        correlate_csp,
+    )
+except Exception:
+    import importlib, scanner as _scanner
+    _scanner = importlib.reload(_scanner)
+    headers_analyzer = getattr(_scanner, "headers_analyzer")
+    test_sqli = getattr(_scanner, "test_sqli")
+    test_xss = getattr(_scanner, "test_xss")
+    test_form = getattr(_scanner, "test_form")
+    graphql_probe = getattr(_scanner, "graphql_probe")
+    openapi_fetch_and_lint = getattr(_scanner, "openapi_fetch_and_lint")
+
+    csper_evaluate_url = getattr(_scanner, "csper_evaluate_url")
+    mozilla_observatory_scan = getattr(_scanner, "mozilla_observatory_scan")
+    centralcsp_scan = getattr(_scanner, "centralcsp_scan")
+    securityheaders_scan = getattr(_scanner, "securityheaders_scan")
+    ssllabs_scan = getattr(_scanner, "ssllabs_scan")
+    cors_tests = getattr(_scanner, "cors_tests")
+    redirect_chain = getattr(_scanner, "redirect_chain")
+    analyze_cookies_from_headers = getattr(_scanner, "analyze_cookies_from_headers")
+    find_mixed_content = getattr(_scanner, "find_mixed_content")
+    correlate_csp = getattr(_scanner, "correlate_csp")
 
 # -------------- Streamlit page setup --------------
 st.set_page_config(page_title="AI Website Security Scanner", layout="wide")
@@ -209,7 +236,7 @@ if st.button("Scan"):
         item["sqli"] = "Possible SQL Injection" if test_sqli(page) else "No SQL Injection"
         item["xss"] = "Possible XSS" if test_xss(page) else "No XSS"
 
-        # AI-style local analysis on actual GET response
+        # AI-style local analysis on actual GET response (+ cookie/mixed if enabled)
         if do_ai or do_cookies or do_mixed:
             try:
                 r = requests.get(page, timeout=10)
